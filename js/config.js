@@ -7,7 +7,7 @@
  * （入金状況・確認 field44 は表示「頭金入金済 立替未」と内部値「頭金 入金済 立替未」がずれている。表示名で送る）。
  *
  * 未決（先方と決める。README「人が決めること」）。決まったらこの表の該当行だけを直す:
- *   - 部品依頼（小川）: field39（今の CRM のラベルは「販売日」。選択肢 実施済/未実施）に当てている
+ *   - 部品依頼: field39（今の CRM のラベルは「販売日」。選択肢 実施済/未実施）に当てている
  *   - 備考: field66（メモ欄、1行）に当てている。field51（今のラベル「客案内納期」、複数行）にする案もある
  *   - 生産予定・入庫予定: 文字 field47 にメモ、日付 field46 に予定日（案A）。案B は field47 と 入庫予定日 field34
  *   - 車検証送信: 「要/不要」しか無いので「不要」だけを済と数える
@@ -66,7 +66,7 @@ var NOUSYA_CONFIG = {
         { key: "insuranceJoin", label: "保険加入", api: "field58", kind: "pick", options: ["既契約車両入替", "〇", "×"], count: true, done: [] },
         { key: "payment", label: "入金確認", api: "field44", kind: "pick", options: ["未入金", "全額済", "半金済", "頭金入金済 立替未", "ローン立替未", "ローン立替済"], count: true, done: ["全額済", "ローン立替済"] },
         { key: "registration", label: "登録課", api: "field45", kind: "text", maxLength: 255 },
-        { key: "partsRequest", label: "部品依頼（小川）", api: "field39", kind: "pick", options: ["実施済", "未実施"], count: true, done: ["実施済"] },
+        { key: "partsRequest", label: "部品依頼", api: "field39", kind: "pick", options: ["実施済", "未実施"], count: true, done: ["実施済"] },
         { key: "advanceRequest", label: "立替依頼", api: "field29", kind: "pick", options: ["済", "未", "不要"], count: true, done: ["済", "不要"] },
         { key: "maintenance", label: "整備指示書", api: "field35", kind: "text", maxLength: 255 },
         { key: "inspectionCert", label: "車検証送信", api: "field42", kind: "pick", options: ["要", "不要"], count: true, done: ["不要"] },

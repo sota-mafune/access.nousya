@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>納車行程管理</title>
     <!-- 版を変えたら ?v= を変える（GitHub Pages は index.html を最大10分キャッシュする） -->
-    <link rel="stylesheet" href="./css/style.css?v=20261120a">
+    <link rel="stylesheet" href="./css/style.css?v=20261120c">
     <script src="https://live.zwidgets.com/js-sdk/1.2/ZohoEmbededAppSDK.min.js"></script>
 </head>
 <body>
@@ -26,9 +26,13 @@
             <label class="filter" id="store-wrap" hidden>店舗
                 <select id="store-select"><option value="">すべての店舗</option></select>
             </label>
+            <label class="filter" id="grid-editor-wrap" hidden>入れた方
+                <input type="text" id="grid-editor" list="staff-names" maxlength="255" autocomplete="off" placeholder="お名前">
+            </label>
             <button type="button" id="reload-list" class="btn-sub">読み直す</button>
         </div>
         <div id="list-notice" class="notice" hidden></div>
+        <div id="grid-status" class="grid-status" hidden></div>
         <div id="list" class="list"></div>
     </div>
 
@@ -55,7 +59,7 @@
 
     <div id="env-badge" class="env-badge" hidden></div>
 
-    <script src="./js/config.js?v=20261120a"></script>
-    <script src="./js/app.js?v=20261120a"></script>
+    <script src="./js/config.js?v=20261120c"></script>
+    <script src="./js/app.js?v=20261120c"></script>
 </body>
 </html>
