@@ -43,6 +43,10 @@ var NOUSYA_CONFIG = {
         naField: "field154"            // 保険トス対象外（チェック）
     },
 
+    // 自動の読み直しの間隔（ミリ秒）。未保存・入力中・保存中・止まった行が無いときだけ読み直す
+    refreshMs: 180000,
+    refreshCheckMs: 15000,
+
     // 管理者とみなすプロファイル名（全件を出し、店舗でも絞れる）
     adminProfiles: ["Administrator", "管理者"],
 

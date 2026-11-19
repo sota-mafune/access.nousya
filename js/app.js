@@ -34,6 +34,7 @@
         gridMode: false,       // 広い画面で表を出しているか
         gridView: [], gridCols: [], active: null, editing: null,
         tossInList: true,
+        lastRefresh: 0, refreshSkip: "", refreshSeq: 0, refreshing: false, flashChanged: {},
         cur: null              // 開いている1台: { id, base, toss, values, seq }
     };
 
@@ -167,6 +168,9 @@
         $("grid-editor-wrap").hidden = !editorReady();
         if (state.staff && state.staff !== "__none__") $("grid-editor").value = state.staff;
         await loadList();
+        // 自動の読み直し: 少しずつ見て、3分たっていて止める理由が無ければ読む。画面が見えたらすぐ1回
+        setInterval(function () { refreshTick(false); }, CFG.refreshCheckMs || 15000);
+        document.addEventListener("visibilitychange", function () { if (!document.hidden) refreshTick(true); });
     }
 
     function storageKey(name) { return "nousya." + name + "." + (state.user ? state.user.id : ""); }
@@ -270,23 +274,9 @@
         setNotice("list-notice", "", "");
         $("count").textContent = "";
         $("list").innerHTML = "<div class='loading'>読み込んでいます…</div>";
-        var notDone = "(" + CFG.doneField + " = false)";
-        var rows;
+        var got;
         try {
-            // 管理者は全件。ほかは担当者（Owner）で絞る。絞り込みが通らなくても全件から手元で絞ることはしない
-            // （上限で切れて自分の車が黙って落ちるため）。エラーとして出す
-            var where = state.isAdmin ? notDone
-                : notDone + " and " + CFG.ownerField + " = '" + String(state.user.id).replace(/[^0-9]/g, "") + "'";
-            state.tossInList = true;
-            try {
-                rows = await coqlAll(where, true);
-            } catch (eToss) {
-                if (seq !== state.listSeq) return;
-                // 保険トス（商談の参照の先）を一緒に読めなければ、それを外して読み直す（表の保険トスの列は「—」）。
-                // 行の絞り込みは同じなので、車が欠けることはない
-                state.tossInList = false;
-                rows = await coqlAll(where, false);
-            }
+            got = await fetchRows();
         } catch (e) {
             if (seq !== state.listSeq) return;
             state.listLoading = false;
@@ -297,13 +287,34 @@
         }
         if (seq !== state.listSeq) return; // 後から始まった読み込み・1台の画面がある
         state.listLoading = false;
-        state.rows = rows.filter(function (r) { return !normBool(r[CFG.doneField]); });
+        state.tossInList = got.toss;
+        state.rows = got.rows;
         state.rows.forEach(function (r) { r.__gen = seq; });
         state.meta = {};          // 表の行ごとの入力・保存の状態（読み直したら空にする。未保存があれば先に画面で確かめている）
         state.listStale = false;
+        markRefreshed();
         fillSelectors();
         if (!state.tossInList) setNotice("list-notice", "warn", "保険トス（商談）を一覧では読めませんでした。1台の画面では表示します。");
         renderList();
+    }
+
+    // 一覧の行を読む（手動の読み直し・自動の読み直しで共通）
+    async function fetchRows() {
+        var notDone = "(" + CFG.doneField + " = false)";
+        // 管理者は全件。ほかは担当者（Owner）で絞る。絞り込みが通らなくても全件から手元で絞ることはしない
+        // （上限で切れて自分の車が黙って落ちるため）。エラーとして出す
+        var where = state.isAdmin ? notDone
+            : notDone + " and " + CFG.ownerField + " = '" + String(state.user.id).replace(/[^0-9]/g, "") + "'";
+        var rows, toss = true;
+        try {
+            rows = await coqlAll(where, true);
+        } catch (eToss) {
+            // 保険トス（商談の参照の先）を一緒に読めなければ、それを外して読み直す（表の保険トスの列は「—」）。
+            // 行の絞り込みは同じなので、車が欠けることはない
+            toss = false;
+            rows = await coqlAll(where, false);
+        }
+        return { rows: rows.filter(function (r) { return !normBool(r[CFG.doneField]); }), toss: toss };
     }
 
     function fillSelectors() {
@@ -397,7 +408,8 @@
             var sub = [];
             if (state.staff === "" || state.isAdmin) sub.push("担当 " + (norm(r[CFG.staffField]) || "なし"));
             if (state.isAdmin) sub.push(norm(r[CFG.storeField]) || "店舗なし");
-            h += "<button type='button' class='car' data-id='" + esc(r.id) + "'>" +
+            var chg = state.flashChanged && state.flashChanged[r.id] && Object.keys(state.flashChanged[r.id]).some(function (k) { return state.flashChanged[r.id][k] > Date.now(); }) ? " car-changed" : "";
+            h += "<button type='button' class='car" + chg + "' data-id='" + esc(r.id) + "'>" +
                 "<div class='car-head'><span class='car-name'>" + esc(norm(r[CFG.customerField]) || "（お客様名なし）") + "</span>" +
                 "<span class='car-model'>" + esc(norm(r[CFG.vehicleField])) + "</span></div>" +
                 "<div class='car-plan'>納車予定 <b>" + esc(plan ? fmtDate(plan) : "未定") + "</b>" +
@@ -547,6 +559,7 @@
             cls.push("c-head");
             var st = "";
             if (m && m.saving) st = "<span class='st st-saving'>保存中…</span>";
+            else if (m && hasConflicts(m)) { st = conflictHtml(row, m); cls.push("row-err"); cls.push("c-head-rs"); }
             else if (m && (m.status === "error" || m.status === "conflict")) { st = "<span class='st st-err'>" + esc(m.msg) + "</span>"; cls.push("row-err"); }
             else if (m && m.status === "warn") st = "<span class='st st-warn'>" + esc(m.msg) + "</span>";
             else if (m && Object.keys(m.edits).length) st = "<span class='st st-dirty'>未保存</span>";
@@ -574,13 +587,15 @@
                     var has = Object.prototype.hasOwnProperty.call(m.edits, f.api);
                     var sending = m.saving && Object.prototype.hasOwnProperty.call(m.sending, f.api);
                     if (sending) cls.push("c-saving");
-                    else if (has && (m.status === "error" || m.status === "conflict")) cls.push("c-err");
+                    else if (has && m.conflicts && m.conflicts[f.api]) cls.push("c-err");
+                    else if (has && m.status === "error") cls.push("c-err");
                     else if (has) cls.push("c-dirty");
                     else if (m.flash[f.api]) cls.push("c-saved");
                 }
             }
             td.textContent = text;
         }
+        if (changedByRefresh(row, c)) cls.push("c-changed");
         if (state.active && state.gridView[state.active.r] === row && state.gridCols[state.active.c] === c) cls.push("active");
         td.className = cls.join(" ");
         if (title) td.title = title; else td.removeAttribute("title");
@@ -593,7 +608,7 @@
         Object.keys(state.meta || {}).forEach(function (id) {
             var m = state.meta[id];
             if (m.saving) saving++;
-            if (m.status === "error" || m.status === "conflict") err++;
+            if (m.status === "error" || hasConflicts(m)) err++;
             else if (Object.keys(m.edits).length && !m.saving) dirty++;
         });
         var parts = [];
@@ -801,6 +816,7 @@
         if (!state.gridMode) return;
         var t = e.target;
         if (t.classList && t.classList.contains("row-reload")) { e.preventDefault(); reloadRow(t.getAttribute("data-reload")); return; }
+        if (t.classList && t.classList.contains("rs-btn")) { e.preventDefault(); resolveRow(t.getAttribute("data-id"), t.getAttribute("data-api"), t.getAttribute("data-rs")); return; }
         if (t.classList && t.classList.contains("cell-editor")) return; // 編集中の入力欄の中
         var td = t.closest ? t.closest("#grid-wrap td") : null;
         if (!td) return;
@@ -822,11 +838,12 @@
         if (!m || !Object.keys(m.edits).length) return;
         clearTimeout(m.timer);
         if (m.needReload) return; // 読み直すまで送らない（理由は行頭）
+        if (hasConflicts(m)) return; // 同じ項目で止まった行は、選び終えるまで送らない
         m.timer = setTimeout(function () { saveRow(row); }, delay || 0);
     }
     function flushAll() {
         commitEditing();
-        (state.rows || []).forEach(function (row) { var m = state.meta[row.id]; if (m && Object.keys(m.edits).length && !m.saving && !m.needReload) saveRow(row); });
+        (state.rows || []).forEach(function (row) { var m = state.meta[row.id]; if (m && Object.keys(m.edits).length && !m.saving && !m.needReload && !hasConflicts(m)) saveRow(row); });
     }
     function rowAlive(row) { return row.__gen === state.listSeq && state.rows.indexOf(row) !== -1; }
     function repaint(row) {
@@ -881,7 +898,7 @@
         clearTimeout(m.timer);
         if (m.saving) { m.again = true; return; }       // 二重に送らない。終わってからもう一度
         var apis = Object.keys(m.edits);
-        if (!apis.length || m.needReload) return;
+        if (!apis.length || m.needReload || hasConflicts(m)) return;
         // 同じ行のセルを編集している間（選択肢のドロップダウンを開いている間も）は送らない。確定から改めて待つ
         if (state.editing && state.editing.row === row) { requestSave(row, AUTOSAVE_MS); return; }
         var editor = "";
@@ -902,9 +919,14 @@
             var changed = changedFields2(fresh, row);
             var clash = changed.filter(function (f) { return Object.prototype.hasOwnProperty.call(sent, f.api); });
             if (clash.length) {
+                // 送らずに、止まった項目ごとに「CRM の今の値 / あなたが入れた値」を選んでもらう。
+                // 行の基準は最新にする（止まっていない項目の入力はそのまま保つ。選び終えるまで自動保存しない）
+                adoptRecord(row, fresh);
+                if (!m.conflicts) m.conflicts = {};
+                clash.forEach(function (f) { m.conflicts[f.api] = { crm: baseValue(f, fresh), mine: sent[f.api] }; });
                 m.saving = false; m.sending = {};
-                setRowError(row, m, "conflict", "ほかで同じ項目が変更されたため送っていません（" + clash.map(function (f) { return f.label; }).join("・") +
-                    "）。「読み直す」で最新に（入れた内容は消えます）", true);
+                m.status = "conflict"; m.msg = "";
+                repaint(row);
                 return;
             }
             if (changed.length) {
@@ -989,6 +1011,241 @@
             "<button type='button' class='btn-sub' id='leave-cancel'>やめる</button>");
     }
 
+    // ---- 同じ項目で止まったときの選び直し（表）
+    // 止まった項目ごとに「CRM の今の値（ほかの方が変更）/ あなたが入れた値」を並べ、
+    // 「CRM の値にする」「自分の値で上書きする」を選ぶ。止まっていない項目の入力はそのまま。
+    // すべて選び終えたら送り直す（そのときの最新と改めて比べ、さらに変わっていればもう一度選んでもらう）。
+    function hasConflicts(m) { return !!(m && m.conflicts && Object.keys(m.conflicts).length); }
+    function fieldOf(api) {
+        for (var i = 0; i < CFG.fields.length; i++) if (CFG.fields[i].api === api) return CFG.fields[i];
+        return { api: api, label: api, kind: "text" };
+    }
+    function fmtVal(f, v) {
+        if (f.kind === "bool") return v ? "✔（入）" : "（空）";
+        if (v === null || v === undefined || v === "") return "（空）";
+        if (f.kind === "date") return fmtSlash(String(v));
+        return String(v);
+    }
+    function conflictHtml(row, m) {
+        var h = "<span class='st st-err'>ほかの方が同じ項目を変更しました。項目ごとに選んでください（選び終えるまで保存しません）</span>";
+        Object.keys(m.conflicts).forEach(function (api) {
+            var f = fieldOf(api), c = m.conflicts[api];
+            var mine = Object.prototype.hasOwnProperty.call(m.edits, api) ? m.edits[api] : c.mine;
+            h += "<div class='rs'><b>" + esc(f.label) + "</b>" +
+                "<div>CRM の今の値：<b>" + esc(fmtVal(f, c.crm)) + "</b>（ほかの方が変更）</div>" +
+                "<div>あなたが入れた値：<b>" + esc(fmtVal(f, mine)) + "</b></div>" +
+                "<button type='button' class='rs-btn' data-rs='crm' data-id='" + esc(row.id) + "' data-api='" + esc(api) + "'>CRM の値にする</button>" +
+                "<button type='button' class='rs-btn' data-rs='mine' data-id='" + esc(row.id) + "' data-api='" + esc(api) + "'>自分の値で上書きする</button></div>";
+        });
+        return h;
+    }
+    function resolveRow(id, api, choice) {
+        var row = null;
+        state.rows.forEach(function (r) { if (String(r.id) === String(id)) row = r; });
+        if (!row) return;
+        var m = state.meta[row.id];
+        if (!m || !m.conflicts || !m.conflicts[api]) return;
+        var c = m.conflicts[api];
+        if (choice === "crm") delete m.edits[api];                       // 基準は最新なので、入力を捨てれば CRM の値
+        else if (!Object.prototype.hasOwnProperty.call(m.edits, api)) m.edits[api] = c.mine;
+        delete m.conflicts[api];
+        if (!hasConflicts(m)) {
+            m.conflicts = null;
+            m.status = ""; m.msg = "";
+            repaint(row);
+            if (Object.keys(m.edits).length) saveRow(row);              // 選び終えたら送り直す（最新と改めて比べる）
+            else { m.status = "warn"; m.msg = "CRM の値にしました"; repaint(row); }
+            return;
+        }
+        repaint(row);
+    }
+
+    // ---- 自動の読み直し（3分ごと。未保存・編集中・保存中・止まった行・選び直しが1つも無いときだけ）
+    // 画面が見えていないときは止め、見えたらすぐ1回読む。選んでいるセル・スクロール・絞り込みは保つ。
+    // 値が変わったセルは数秒だけ淡く色を付ける。間隔は js/config.js の refreshMs（既定 3分）
+    var FLASH_MS = 4000;  // 読み直しで変わったセルに色を付けておく時間
+    function refreshEvery() { return CFG.refreshMs || 180000; }
+    function hhmm(t) { var d = new Date(t); return pad2(d.getHours()) + ":" + pad2(d.getMinutes()); }
+    function markRefreshed() { state.lastRefresh = Date.now(); state.refreshSkip = ""; showRefreshInfo(); }
+    function showRefreshInfo() {
+        var t = state.lastRefresh ? "最新に更新: " + hhmm(state.lastRefresh) : "";
+        var skip = state.refreshSkip ? "（" + state.refreshSkip + "）" : "";
+        ["refresh-info", "detail-refresh"].forEach(function (id) {
+            var el = $(id);
+            if (!el) return;
+            el.innerHTML = esc(t) + (skip ? " <span class='skip'>" + esc(skip) + "</span>" : "");
+        });
+    }
+    // 読み直しを見送る理由（無ければ ""）
+    function refreshBlocker() {
+        if (!state.user || state.listLoading) return "読み込み中のため";
+        if (!$("view-message").hidden) return "読み込み中のため";
+        if (!$("view-detail").hidden) {
+            var cur = state.cur;
+            if (!cur) return "読み込み中のため";
+            if (state.saving) return "保存中のため";
+            if (cur.conflicts && Object.keys(cur.conflicts).length) return "選び直しの途中のため";
+            if (Object.keys(changedFields()).length) return "保存していない入力があるため";
+            return "";
+        }
+        if (state.editing) return "入力中のため";
+        if (state.pendingLeave || $("leave-cancel")) return "確かめの途中のため";
+        var why = "";
+        Object.keys(state.meta || {}).forEach(function (id) {
+            var m = state.meta[id];
+            if (!m || why) return;
+            if (m.saving) why = "保存中の行があるため";
+            else if (hasConflicts(m)) why = "選び直しの途中の行があるため";
+            else if (m.status === "error" || m.needReload) why = "保存できなかった行があるため";
+            else if (Object.keys(m.edits).length) why = "保存していない入力があるため";
+        });
+        return why;
+    }
+    function refreshTick(force) {
+        if (document.hidden) return;
+        if (!force && state.lastRefresh && Date.now() - state.lastRefresh < refreshEvery()) return;
+        var why = refreshBlocker();
+        if (why) {
+            var msg = why + "、自動の更新を見送っています";
+            if (state.refreshSkip !== msg) { state.refreshSkip = msg; showRefreshInfo(); }
+            return;
+        }
+        autoRefresh();
+    }
+    function changedByRefresh(row, c) {
+        var fl = state.flashChanged && state.flashChanged[row.id], now = Date.now();
+        if (!fl) return false;
+        function on(k) { return !!fl[k] && fl[k] > now; }
+        if (on("*")) return true;
+        if (c.head) return false;
+        if (c.extra) return on(c.extra);
+        return !!(c.f && (c.f.kind === "toss" ? on("__toss") : on(c.f.api)));
+    }
+    async function autoRefresh() {
+        if (state.refreshing) return;
+        if (!$("view-detail").hidden) { await refreshDetail(); return; }
+        var listSeq0 = state.listSeq, mySeq = ++state.refreshSeq, toss0 = state.tossInList;
+        state.refreshing = true;
+        var got;
+        try { got = await fetchRows(); }
+        catch (e) {
+            state.refreshing = false;
+            if (mySeq === state.refreshSeq && listSeq0 === state.listSeq) {
+                state.lastRefresh = Date.now();        // 失敗しても次は3分後（毎回たたかない）
+                state.refreshSkip = "自動の更新に失敗しました（" + errText(e) + "）";
+                showRefreshInfo();
+            }
+            return;
+        }
+        state.refreshing = false;
+        // 読んでいる間に手で読み直した・1台の画面に移った・入力を始めた → この結果は捨てる
+        if (mySeq !== state.refreshSeq || listSeq0 !== state.listSeq || $("view-list").hidden || refreshBlocker()) return;
+        // 変わったセルを調べる
+        var old = {};
+        state.rows.forEach(function (r) { old[r.id] = r; });
+        var changes = {};
+        got.rows.forEach(function (nr) {
+            var o = old[nr.id];
+            if (!o) { changes[nr.id] = { "*": true }; return; }
+            var cs = {};
+            CFG.fields.forEach(function (f) {
+                if (f.kind === "toss") { if (got.toss && toss0 && tossTextOf(o, true) !== tossTextOf(nr, true)) cs.__toss = true; return; }
+                if (!f.api || !exists(f.api)) return;
+                if (cmpValue(f, o) !== cmpValue(f, nr)) cs[f.api] = true;
+            });
+            [CFG.staffField, CFG.storeField].forEach(function (k) { if (norm(o[k]) !== norm(nr[k])) cs[k] = true; });
+            if (Object.keys(cs).length) changes[nr.id] = cs;
+        });
+        // 位置を控える
+        var wrap = $("grid-wrap"), sl = wrap ? wrap.scrollLeft : 0, st = wrap ? wrap.scrollTop : 0;
+        var hadFocus = wrap && document.activeElement === wrap;
+        var activeId = null, activeC = null;
+        if (state.gridMode && state.active && state.gridView[state.active.r]) { activeId = state.gridView[state.active.r].id; activeC = state.active.c; }
+        var winY = window.scrollY;
+        // 差し替える（行ごとの状態 meta は id で引くので保つ。無くなった行のものは消す）
+        var seq = ++state.listSeq;
+        got.rows.forEach(function (r) { r.__gen = seq; });
+        var ids = {};
+        got.rows.forEach(function (r) { ids[r.id] = true; });
+        Object.keys(state.meta || {}).forEach(function (id) { if (!ids[id]) delete state.meta[id]; });
+        state.rows = got.rows;
+        state.tossInList = got.toss;
+        var until = Date.now() + FLASH_MS, keepFl = {};
+        Object.keys(state.flashChanged || {}).forEach(function (id) {
+            if (!ids[id]) return;
+            var o = state.flashChanged[id], k2 = {};
+            Object.keys(o).forEach(function (k) { if (o[k] > Date.now()) k2[k] = o[k]; });
+            if (Object.keys(k2).length) keepFl[id] = k2;
+        });
+        Object.keys(changes).forEach(function (id) {
+            keepFl[id] = keepFl[id] || {};
+            Object.keys(changes[id]).forEach(function (k) { keepFl[id][k] = until; });
+        });
+        state.flashChanged = keepFl;
+        markRefreshed();
+        fillSelectors();
+        renderList();
+        // 位置を戻す
+        if (state.gridMode) {
+            wrap = $("grid-wrap");
+            if (wrap) { wrap.scrollLeft = sl; wrap.scrollTop = st; }
+            if (activeId !== null) {
+                var ri = -1;
+                state.gridView.forEach(function (r, i) { if (String(r.id) === String(activeId)) ri = i; });
+                if (ri !== -1) setActive(ri, Math.min(activeC, state.gridCols.length - 1), true);
+            }
+            if (hadFocus && wrap) wrap.focus({ preventScroll: true });
+        }
+        window.scrollTo(0, winY);
+        if (Object.keys(changes).length) {
+            clearTimeout(state.flashTimer);
+            state.flashTimer = setTimeout(function () {
+                if (state.gridMode) state.gridView.forEach(function (r, i) { updateRow(i); });
+                document.querySelectorAll(".car-changed").forEach(function (el) { el.classList.remove("car-changed"); });
+            }, FLASH_MS + 50);
+        }
+    }
+    function tossTextOf(row, inList) { var keep = state.tossInList; state.tossInList = inList; var t = tossText(row); state.tossInList = keep; return t; }
+
+    // 1台の画面の自動の読み直し（入力が無いときだけ。値が変わった項目に数秒だけ色を付ける）
+    async function refreshDetail() {
+        var cur = state.cur, vseq = state.viewSeq, y = window.scrollY;
+        if (!cur) return;
+        state.refreshing = true;
+        var fresh;
+        try { fresh = await getOne(CFG.module, cur.id); }
+        catch (e) {
+            state.refreshing = false;
+            state.lastRefresh = Date.now();
+            state.refreshSkip = "自動の更新に失敗しました（" + errText(e) + "）";
+            showRefreshInfo();
+            return;
+        }
+        state.refreshing = false;
+        if (state.cur !== cur || state.viewSeq !== vseq || refreshBlocker()) return;
+        var changed = changedFields2(fresh, cur.base);
+        var oldLk = cur.base[CFG.deal.lookupField], newLk = fresh[CFG.deal.lookupField];
+        var keepToss = cur.toss, editorVal = $("editor-input").value;
+        var lkChanged = (oldLk && oldLk.id) !== (newLk && newLk.id);
+        cur.base = fresh;
+        cur.toss = keepToss;
+        if (!changed.length && !lkChanged) { markRefreshed(); return; } // 変わっていなければ描き直さない（色も保つ）
+        renderDetail();
+        $("editor-input").value = editorVal;
+        if ((oldLk && oldLk.id) !== (newLk && newLk.id)) loadToss(fresh);
+        window.scrollTo(0, y);
+        state.listStale = true;
+        markRefreshed();
+        changed.forEach(function (f) {
+            var el = document.querySelector("#items .item[data-item='" + f.api + "']");
+            if (el) el.classList.add("item-changed");
+        });
+        if (changed.length) {
+            clearTimeout(state.flashTimer);
+            state.flashTimer = setTimeout(function () { document.querySelectorAll(".item-changed").forEach(function (el) { el.classList.remove("item-changed"); }); }, FLASH_MS);
+        }
+    }
+
     // ---------------------------------------------------------------- ② 1台の画面
     async function getOne(module, id) {
         var res = await ZOHO.CRM.API.getRecord({ Entity: module, RecordID: id });
@@ -1053,7 +1310,7 @@
         var h = "";
         CFG.fields.forEach(function (f) {
             if (f.kind !== "toss" && !exists(f.api)) return;
-            h += "<div class='item item-" + f.kind + "'><label class='item-label' for='in-" + f.key + "'>" + esc(f.label) +
+            h += "<div class='item item-" + f.kind + "' data-item='" + esc(f.api) + "'><label class='item-label' for='in-" + f.key + "'>" + esc(f.label) +
                 (f.note ? "<small>" + esc(f.note) + "</small>" : "") + "</label><div class='item-input'>";
             if (f.kind === "display") {
                 var dv = f.date ? fmtDate(rec[f.api]) : norm(rec[f.api]);
@@ -1160,9 +1417,55 @@
         return (sent === null ? "" : sent) === g;
     }
 
+    // 1台の画面の入力欄に値を入れる（選び直しで「CRM の値にする」とき・最新にそろえるとき）
+    function setInputValue(api, v) {
+        var el = document.querySelector("#items [data-api='" + api + "']");
+        if (!el) return;
+        if (el.classList.contains("pills")) {
+            el.querySelectorAll(".pill").forEach(function (b) { b.classList.toggle("on", b.getAttribute("data-val") === v); });
+        } else if (el.type === "checkbox") el.checked = !!v;
+        else if (el.tagName === "SELECT") {
+            if (v && !Array.prototype.some.call(el.options, function (o) { return o.value === v; })) {
+                var op = document.createElement("option"); op.value = v; op.textContent = v; el.appendChild(op);
+            }
+            el.value = v || "";
+        } else el.value = v || "";
+    }
+    function showDetailConflicts() {
+        var cur = state.cur;
+        if (!cur || !cur.conflicts || !Object.keys(cur.conflicts).length) { setNotice("detail-notice", "", ""); return; }
+        var now = currentValues();
+        var h = "開いた後に、同じ項目をほかの方が変更しました。項目ごとに選んでください（選び終えるまで保存しません）。";
+        Object.keys(cur.conflicts).forEach(function (api) {
+            var f = fieldOf(api), c = cur.conflicts[api];
+            var mine = Object.prototype.hasOwnProperty.call(now, api) ? now[api] : c.mine;
+            h += "<div class='rs'><b>" + esc(f.label) + "</b>" +
+                "<div>CRM の今の値：<b>" + esc(fmtVal(f, c.crm)) + "</b>（ほかの方が変更）</div>" +
+                "<div>あなたが入れた値：<b>" + esc(fmtVal(f, mine)) + "</b></div>" +
+                "<button type='button' class='btn-sub rs-d' data-rs='crm' data-api='" + esc(api) + "'>CRM の値にする</button> " +
+                "<button type='button' class='btn-sub rs-d' data-rs='mine' data-api='" + esc(api) + "'>自分の値で上書きする</button></div>";
+        });
+        setNotice("detail-notice", "error", h);
+        updateDirty();
+    }
+    function resolveDetail(api, choice) {
+        var cur = state.cur;
+        if (!cur || !cur.conflicts || !cur.conflicts[api] || state.saving) return;
+        if (choice === "crm") setInputValue(api, cur.conflicts[api].crm);
+        delete cur.conflicts[api];
+        if (Object.keys(cur.conflicts).length) { showDetailConflicts(); return; }
+        cur.conflicts = null;
+        setNotice("detail-notice", "", "");
+        updateDirty();
+        // 選び終えたら送り直す（最新と改めて比べる。さらに変わっていればもう一度選んでもらう）
+        if (Object.keys(changedFields()).length) save();
+        else setNotice("detail-notice", "ok", "CRM の値にしました。");
+    }
+
     async function save() {
         var cur = state.cur;
         if (!cur) return;
+        if (cur.conflicts && Object.keys(cur.conflicts).length) { showDetailConflicts(); return; }
         var diff = changedFields(), apis = Object.keys(diff);
         if (!apis.length) { updateDirty(); return; }
         var editor = "";
@@ -1181,10 +1484,20 @@
             var changed = changedFields2(fresh, cur.base);
             var clash = changed.filter(function (f) { return apis.indexOf(f.api) !== -1; });
             if (clash.length) {
-                setNotice("detail-notice", "error",
-                    "開いた後に、同じ項目がほかで変更されました（" + esc(clash.map(function (f) { return f.label; }).join("・")) + "）。上書きしないよう、保存していません。" +
-                    "<br><button type='button' class='btn-sub' id='reload-btn'>最新を読み込み直す（入れた内容は消えます）</button>");
+                // 送らずに、止まった項目ごとに選んでもらう。基準は最新にし、入れていない項目の入力欄も最新にそろえる
+                // （止まっていない自分の入力はそのまま保つ）
+                cur.conflicts = cur.conflicts || {};
+                clash.forEach(function (f) { cur.conflicts[f.api] = { crm: baseValue(f, fresh), mine: diff[f.api] }; });
+                var keepToss0 = cur.toss;
+                cur.base = fresh;
+                cur.toss = keepToss0;
+                Object.keys(cur.values).forEach(function (api) {
+                    var nv = baseValue(fieldOf(api), fresh);
+                    if (!Object.prototype.hasOwnProperty.call(diff, api)) setInputValue(api, nv);
+                    cur.values[api] = nv;
+                });
                 setBusy(false);
+                showDetailConflicts();
                 return;
             }
             if (changed.length) {
@@ -1357,7 +1670,8 @@
             var id = ev.target && ev.target.id;
             if (id === "reload-btn" && state.cur && !state.saving) openCar(state.cur.id);
             else if (id === "leave-yes") leaveToList();
-            else if (id === "leave-no") setNotice("detail-notice", "", "");
+            else if (ev.target && ev.target.classList && ev.target.classList.contains("rs-d")) resolveDetail(ev.target.getAttribute("data-api"), ev.target.getAttribute("data-rs"));
+            else if (id === "leave-no") showDetailConflicts(); // 選び直しの途中なら選択を出し直す（無ければ消える）
         });
     }
 

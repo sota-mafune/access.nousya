@@ -171,3 +171,18 @@ table.grid .cell-editor.bad { border-color: #d32f2f; background: #fdecea; }
 .env-sandbox { background: #ffe08a; color: #5a4300; border: 1px solid #c9a300; }
 .env-prod { background: #e0e4ea; color: #333; border: 1px solid #9aa5b5; }
 .env-unknown { background: #fff; color: #888; border: 1px dashed #aaa; }
+
+/* 自動の読み直し */
+.refresh-info { font-size: 14px; color: #555; }
+.refresh-info .skip { color: #8a5a00; }
+.bar .refresh-info { color: #dfe6f0; }
+.bar .refresh-info .skip { color: #ffe08a; }
+table.grid td.c-changed { background: #e3ecff; transition: background .4s; }
+.car.car-changed, .item.item-changed { background: #e3ecff; transition: background .4s; }
+
+/* 同じ項目で止まったときの選び直し */
+table.grid td.c-head-rs { min-width: 300px; max-width: 360px; vertical-align: top; }
+.rs { margin-top: 6px; padding: 6px 8px; border: 1px solid #d32f2f; border-radius: 6px; background: #fff; font-size: 14px; color: #222; }
+.rs b { color: #1f3864; }
+.rs-btn { font-size: 14px; padding: 4px 8px; margin: 4px 4px 0 0; border: 1px solid #1f3864; color: #1f3864; background: #fff; border-radius: 4px; min-height: 32px; }
+.notice .rs { margin-top: 8px; }
