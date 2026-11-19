@@ -416,8 +416,12 @@
     // 操作: セルを押す / Enter / F2 で編集、Tab・Shift+Tab で左右、Enter・矢印で上下、Esc で取り消し、
     //       チェックは Space（選んでいるチェックのセルをもう一度押しても切り替わる）、Delete で空にする。
     // 保存は自動: 行を抜けたとき、または確定から AUTOSAVE_MS 後に、その行の変えたセルだけを送る。
-    //   送る前に読み直して Modified_Time を比べ、違えば送らずにセルを赤くして理由を出す。送った後は読み戻す。
+    //   送る前に読み直し、この画面で扱う項目の値を行の基準と比べる（Modified_Time は比べない。保存で動く CRM の
+    //   ワークフローや画面に無い項目の更新でも進むため）。今回送る項目そのものが他で変わっていれば、送らずに
+    //   セルを赤くして理由を出す。ほかの項目だけが変わっていれば、基準を最新に差し替えて（画面にも出して）送る。
+    //   送った後は必ず読み戻した値で基準を差し替える（読み戻せなければ送った値で）。
     //   1行に送信は同時に1本だけ（送っている間の入力は、終わってからもう一度送る）。
+    //   セルを編集している間（選択肢のドロップダウンを開いている間も）は送らない。
     var AUTOSAVE_MS = 3000;
     var WIDE_PX = 700;
 
@@ -465,6 +469,7 @@
         var d = CFG.deal, lk = row[d.lookupField];
         if (!state.tossInList) return "—";
         if (!lk || (typeof lk === "object" && !lk.id)) return "（紐づけなし）";
+        if (row.__tossStale) return "（読み直すと表示）";
         if (normBool(row[d.lookupField + "." + d.naField])) return "対象外";
         var t = dateOnly(row[d.lookupField + "." + d.tossField]);
         return t ? fmtSlash(t) : "未";
@@ -625,14 +630,22 @@
         if (!wrap) return;
         var stickyW = 0;
         state.gridCols.forEach(function (c, ci) { if (isSticky(c)) { var th = wrap.querySelector("th[data-c='" + ci + "']"); if (th) stickyW += th.getBoundingClientRect().width; } });
+        // まずブラウザに近い位置まで送らせる（表の枠・ページのどちらが送られるものでも効く）
+        if (!td.classList.contains("sticky") && td.scrollIntoView) {
+            try { td.scrollIntoView({ block: "nearest", inline: "nearest" }); } catch (e) { td.scrollIntoView(false); }
+        }
+        // そのうえで、固定列（左）と見出し行（上）の下に隠れないように、表の枠の見えている範囲で合わせる。
+        // 見えている範囲は縦・横のスクロールバーを除いた clientWidth / clientHeight で測る
         var wr = wrap.getBoundingClientRect(), r = td.getBoundingClientRect();
         var headH = wrap.querySelector("thead").getBoundingClientRect().height;
+        var viewL = wr.left + wrap.clientLeft, viewR = viewL + wrap.clientWidth;
+        var viewT = wr.top + wrap.clientTop, viewB = viewT + wrap.clientHeight;
         if (!td.classList.contains("sticky")) {
-            if (r.left < wr.left + stickyW) wrap.scrollLeft -= (wr.left + stickyW - r.left);
-            else if (r.right > wr.right) wrap.scrollLeft += (r.right - wr.right);
+            if (r.left < viewL + stickyW) wrap.scrollLeft -= (viewL + stickyW - r.left);
+            else if (r.right > viewR) wrap.scrollLeft += (r.right - viewR);
         }
-        if (r.top < wr.top + headH) wrap.scrollTop -= (wr.top + headH - r.top);
-        else if (r.bottom > wr.bottom) wrap.scrollTop += (r.bottom - wr.bottom);
+        if (r.top < viewT + headH) wrap.scrollTop -= (viewT + headH - r.top);
+        else if (r.bottom > viewB) wrap.scrollTop += (r.bottom - viewB);
     }
     function move(dr, dc) {
         if (!state.active) { setActive(0, 1); return; }
@@ -642,7 +655,8 @@
     function activeRow() { return state.active ? state.gridView[state.active.r] : null; }
 
     // ---- 値を入れる
-    function applyValue(row, f, v) {
+    // noSchedule: 選択肢のドロップダウンで選んでいる最中（編集を終えたときに予約する）
+    function applyValue(row, f, v, noSchedule) {
         var m = metaOf(row.id), base = baseValue(f, row);
         if (v === base) delete m.edits[f.api]; else m.edits[f.api] = v;
         if (m.status !== "conflict" && !m.needReload) { m.status = ""; m.msg = ""; }
@@ -650,7 +664,7 @@
         var ri = state.gridView.indexOf(row);
         if (ri !== -1) updateRow(ri);
         updateGridStatus();
-        requestSave(row, AUTOSAVE_MS);
+        if (!noSchedule) requestSave(row, AUTOSAVE_MS);
     }
 
     function startEdit(initial) {
@@ -682,7 +696,8 @@
         td.appendChild(el);
         el.addEventListener("keydown", onEditorKey);
         el.addEventListener("blur", function () { if (state.editing && state.editing.el === el) finishEdit(true, true); });
-        if (f.kind === "pick") el.addEventListener("change", function () { if (state.editing && state.editing.el === el) applyValue(row, f, el.value); });
+        // 選んだ値はすぐ画面（進み具合・色）に出すが、送るのは編集を終えてから（行を抜けたとき・確定から3秒後）
+        if (f.kind === "pick") el.addEventListener("change", function () { if (state.editing && state.editing.el === el) applyValue(row, f, el.value, true); });
         el.focus();
         if (el.select && f.kind !== "pick" && initial === undefined) el.select();
         if (f.kind === "pick" && initial === "open" && el.showPicker) { try { el.showPicker(); } catch (e) { /* 開けなくてもキーで選べる */ } }
@@ -709,7 +724,11 @@
         if (td) td.classList.remove("editing");
         if (commit) {
             if (v !== cellVal(ed.row, f)) applyValue(ed.row, f, v);
-            else if (state.gridView[ed.r] === ed.row) updateRow(ed.r);
+            else {
+                if (state.gridView[ed.r] === ed.row) updateRow(ed.r);
+                // 選択肢はドロップダウンの中で選んだときに値だけ入れてあるので、確定したここで保存を予約する
+                requestSave(ed.row, AUTOSAVE_MS);
+            }
         } else {
             if (f.kind === "pick" && cellVal(ed.row, f) !== ed.orig) applyValue(ed.row, f, ed.orig);
             else if (state.gridView[ed.r] === ed.row) updateRow(ed.r);
@@ -821,38 +840,78 @@
         repaint(row);
     }
 
+    // 比べるための値（取り方で形が違いうるものをそろえる）。
+    // 選択肢は空白を除く（field44 の表示「頭金入金済 立替未」と内部値「頭金 入金済 立替未」を同じと見る）、
+    // 数（数式）は数として、日付は日付の部分だけ、文字は前後の空白を除く
+    function cmpValue(f, rec) {
+        var v = baseValue(f, rec);
+        if (typeof v === "boolean") return v;
+        if (f.kind === "pick") return String(v).replace(/[\s　]/g, "");
+        if (f.kind === "number") { var n = parseFloat(v); return isNaN(n) ? String(v) : String(Math.round(n * 1000) / 1000); }
+        return String(v).trim();
+    }
+    // この画面で扱う項目（表示だけの列も含む。対応表の全項目）のうち、a と b で値が違うもの
+    function changedFields2(a, b) {
+        var out = [];
+        CFG.fields.forEach(function (f) {
+            if (!f.api || f.kind === "toss" || !exists(f.api)) return;
+            if (cmpValue(f, a) !== cmpValue(f, b)) out.push(f);
+        });
+        return out;
+    }
+    // 知らせるのは入力する項目だけ（表示だけの項目・数式は、ワークフローや日付で変わるので黙って最新にする）
+    function inputLabels(fs) {
+        return fs.filter(function (f) { return f.kind === "date" || f.kind === "pick" || f.kind === "text" || f.kind === "bool"; })
+            .map(function (f) { return f.label; });
+    }
+    // CRM から読んだレコードで行の基準を差し替える（保険トスは一覧で読んだ値を、商談の紐づけが同じなら残す）
+    function adoptRecord(row, rec) {
+        var keep = {};
+        tossKeys().concat([CFG.deal.lookupField]).forEach(function (k) { keep[k] = row[k]; });
+        Object.keys(rec).forEach(function (k) { if (k !== "__gen") row[k] = rec[k]; });
+        var lk = rec[CFG.deal.lookupField], oldLk = keep[CFG.deal.lookupField];
+        if (lk && oldLk && lk.id === oldLk.id) tossKeys().forEach(function (k) { row[k] = keep[k]; });
+        else if (!lk) tossKeys().forEach(function (k) { row[k] = null; });
+        else row.__tossStale = true; // 紐づく商談が変わった: 一覧を読み直すまで分からない
+    }
+
     async function saveRow(row) {
         var m = state.meta[row.id];
         if (!m) return;
         clearTimeout(m.timer);
         if (m.saving) { m.again = true; return; }       // 二重に送らない。終わってからもう一度
-        // 編集中のセルが同じ行なら、そのセルの確定を待つ（確定で改めて保存が予約される）
         var apis = Object.keys(m.edits);
         if (!apis.length || m.needReload) return;
+        // 同じ行のセルを編集している間（選択肢のドロップダウンを開いている間も）は送らない。確定から改めて待つ
+        if (state.editing && state.editing.row === row) { requestSave(row, AUTOSAVE_MS); return; }
         var editor = "";
         if (editorReady()) {
             editor = String($("grid-editor").value || "").trim();
             if (!editor) { setRowError(row, m, "error", "表の上の「入れた方」を入れてください（入れると保存します）"); return; }
         }
-        if (!norm(row.Modified_Time)) { setRowError(row, m, "error", "更新日時が分からないため、上書きを避けて保存しません", true); return; }
         var sent = {};
         apis.forEach(function (a) { sent[a] = m.edits[a]; });
         var gen = row.__gen;
         m.saving = true; m.sending = sent; m.status = ""; m.msg = ""; m.again = false;
         repaint(row);
-        var data;
+        var data, refreshed = [];
         try {
             var fresh = await getOne(CFG.module, row.id);
             if (row.__gen !== gen) return;
-            if (!norm(fresh.Modified_Time) || norm(fresh.Modified_Time) !== norm(row.Modified_Time)) {
-                var changed = [];
-                CFG.fields.forEach(function (f) {
-                    if (!f.api || f.kind === "toss" || !exists(f.api)) return;
-                    if (baseValue(f, fresh) !== baseValue(f, row)) changed.push(f.label);
-                });
+            // 競合は値で見る（Modified_Time はワークフローや画面に無い項目の更新でも進むので見ない）
+            var changed = changedFields2(fresh, row);
+            var clash = changed.filter(function (f) { return Object.prototype.hasOwnProperty.call(sent, f.api); });
+            if (clash.length) {
                 m.saving = false; m.sending = {};
-                setRowError(row, m, "conflict", "ほかで変更されたため送っていません" + (changed.length ? "（" + changed.join("・") + "）" : "") + "。「読み直す」で最新に（入れた内容は消えます）", true);
+                setRowError(row, m, "conflict", "ほかで同じ項目が変更されたため送っていません（" + clash.map(function (f) { return f.label; }).join("・") +
+                    "）。「読み直す」で最新に（入れた内容は消えます）", true);
                 return;
+            }
+            if (changed.length) {
+                // 送らない項目だけが変わっていた: 基準を最新に差し替え、画面にも出してから送る
+                adoptRecord(row, fresh);
+                refreshed = inputLabels(changed);
+                repaint(row);
             }
             data = { id: row.id };
             apis.forEach(function (a) { data[a] = toSend(a, sent[a]); });
@@ -871,26 +930,24 @@
         var back = null, backErr = null;
         try { back = await getOne(CFG.module, row.id); } catch (e2) { backErr = e2; }
         if (row.__gen !== gen) return;
-        var keep = {};
-        tossKeys().concat([CFG.deal.lookupField]).forEach(function (k) { keep[k] = row[k]; });
-        if (back) {
-            Object.keys(back).forEach(function (k) { row[k] = back[k]; });
-            var lk = back[CFG.deal.lookupField], oldLk = keep[CFG.deal.lookupField];
-            if (lk && oldLk && lk.id === oldLk.id) tossKeys().forEach(function (k) { row[k] = keep[k]; });
-        } else {
-            apis.forEach(function (a) { row[a] = data[a]; });
-            row.Modified_Time = "";
-        }
+        // 保存が通ったら、必ず行の基準を差し替える（読み戻した値。読み戻せなければ送った値）
+        if (back) adoptRecord(row, back);
+        else apis.forEach(function (a) { row[a] = data[a]; });
         // 送った値のままのセルだけ「未保存」から外す（送っている間に入れ直したセルは残す）
         apis.forEach(function (a) { if (m.edits[a] === sent[a]) delete m.edits[a]; });
         m.saving = false; m.sending = {};
+        var also = refreshed.length ? "。ほかで変わっていた項目（" + refreshed.join("・") + "）は最新を表示しています" : "";
         if (!back) {
-            setRowError(row, m, "warn", "保存しました。保存後の内容を読み戻せませんでした（" + errText(backErr) + "）。「読み直す」を押してください", true);
+            m.status = "warn";
+            m.msg = "保存しました。保存後の内容を読み戻せませんでした（" + errText(backErr) + "）。表は送った値で表示しています" + also;
+            repaint(row);
+            if (m.again || Object.keys(m.edits).length) requestSave(row, m.again ? 0 : AUTOSAVE_MS);
             return;
         }
         var diffs = [];
         apis.forEach(function (a) { if (!sameValue(a, data[a], back)) diffs.push(labelOf(a)); });
-        if (diffs.length) { m.status = "warn"; m.msg = "保存しましたが、入れた値と違う値になりました（" + diffs.join("・") + "）"; }
+        if (diffs.length) { m.status = "warn"; m.msg = "保存しましたが、入れた値と違う値になりました（" + diffs.join("・") + "）" + also; }
+        else if (also) { m.status = "warn"; m.msg = "保存しました" + also; }
         else { m.status = "saved"; m.msg = ""; }
         apis.forEach(function (a) { m.flash[a] = true; });
         repaint(row);
@@ -1113,31 +1170,28 @@
             editor = String($("editor-input").value || "").trim();
             if (!editor) { setNotice("detail-notice", "warn", "「入れた方」を選ぶか入れてください。"); $("editor-input").focus(); return; }
         }
-        // 開いたときの更新日時が無いと、他で変わったかを比べられない。上書きを避けるため送らない
-        if (!norm(cur.base.Modified_Time)) {
-            setNotice("detail-notice", "error", "この車両の更新日時を読めなかったため、上書きを避けて保存しません。" +
-                "<br><button type='button' class='btn-sub' id='reload-btn'>最新を読み込み直す（入れた内容は消えます）</button>");
-            return;
-        }
         setBusy(true);
         setNotice("detail-notice", "", "");
-        var data, apisSent;
+        var data, apisSent, refreshed = [];
         try {
-            // 1. 送る前に読み直す。開いた後に他で変わっていれば送らない
+            // 1. 送る前に読み直し、値で比べる（Modified_Time はワークフローなどでも進むので見ない）。
+            //    今回送る項目そのものが開いた後に他で変わっていれば送らない。ほかの項目だけなら基準を最新にして送る
             var fresh = await getOne(CFG.module, cur.id);
             if (state.cur !== cur) { setBusy(false); return; }
-            if (!norm(fresh.Modified_Time) || norm(fresh.Modified_Time) !== norm(cur.base.Modified_Time)) {
-                var changedByOthers = [];
-                CFG.fields.forEach(function (f) {
-                    if (!f.api || f.kind === "toss" || !exists(f.api)) return;
-                    if (baseValue(f, fresh) !== baseValue(f, cur.base)) changedByOthers.push(f.label);
-                });
+            var changed = changedFields2(fresh, cur.base);
+            var clash = changed.filter(function (f) { return apis.indexOf(f.api) !== -1; });
+            if (clash.length) {
                 setNotice("detail-notice", "error",
-                    "開いた後に、この車両がほかで変更されました（" + esc(fmtDateTime(fresh.Modified_Time)) + "）。上書きしないよう、保存していません。" +
-                    (changedByOthers.length ? "<br>変わった項目: " + esc(changedByOthers.join("・")) : "") +
+                    "開いた後に、同じ項目がほかで変更されました（" + esc(clash.map(function (f) { return f.label; }).join("・")) + "）。上書きしないよう、保存していません。" +
                     "<br><button type='button' class='btn-sub' id='reload-btn'>最新を読み込み直す（入れた内容は消えます）</button>");
                 setBusy(false);
                 return;
+            }
+            if (changed.length) {
+                refreshed = inputLabels(changed);
+                var keepToss = cur.toss;
+                cur.base = fresh;
+                cur.toss = keepToss;
             }
             // 2. 変えた項目だけを送る
             data = { id: cur.id };
@@ -1162,15 +1216,14 @@
         } catch (e2) {
             if (state.cur !== cur) { setBusy(false); return; }
             // 画面の基準を送った値に差し替える（このまま続けて入れても、送った項目が「変更あり」に戻らない）。
-            // 更新日時は分からないので空にし、次の保存は「最新を読み込み直す」まで送らない
+            // 競合は値で見るので、続けて保存してよい
             var nb = JSON.parse(JSON.stringify(cur.base));
             apisSent.forEach(function (api) { nb[api] = data[api]; });
-            nb.Modified_Time = "";
             cur.base = nb;
             setBusy(false);
             renderDetail();
             setNotice("detail-notice", "warn", "保存しました（" + apisSent.length + " 項目）。ただし、保存後の内容を読み戻せませんでした（" + esc(errText(e2)) +
-                "）。続けて入れる前に読み込み直してください。" +
+                "）。画面は送った値で表示しています。" +
                 "<br><button type='button' class='btn-sub' id='reload-btn'>最新を読み込み直す</button>");
             return;
         }
@@ -1182,8 +1235,11 @@
         setBusy(false);
         renderDetail();
         loadToss(back);
+        var also = refreshed.length ? "<br>開いた後にほかで変わっていた項目（" + esc(refreshed.join("・")) + "）は、最新を表示しています。" : "";
         if (diffs.length) {
-            setNotice("detail-notice", "warn", "保存しましたが、次の項目は入れた値と違う値になっています（CRM の自動処理で変わった可能性があります）: " + esc(diffs.join("・")));
+            setNotice("detail-notice", "warn", "保存しましたが、次の項目は入れた値と違う値になっています（CRM の自動処理で変わった可能性があります）: " + esc(diffs.join("・")) + also);
+        } else if (also) {
+            setNotice("detail-notice", "warn", "保存しました（" + apisSent.length + " 項目）。" + also);
         } else {
             setNotice("detail-notice", "ok", "保存しました（" + apisSent.length + " 項目）。");
         }
