@@ -1,0 +1,120 @@
+@charset "UTF-8";
+/* 納車行程管理ウィジェット。スマホ幅では縦1列、広い画面では項目を2列に並べる。文字は大きめ */
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+html, body { margin: 0; padding: 0; }
+body {
+    font-family: "Meiryo", "Hiragino Sans", "Noto Sans JP", sans-serif;
+    font-size: 16px; line-height: 1.5; color: #222; background: #f3f5f8;
+    padding-bottom: 180px; /* 下に固定した保存の帯に最後の項目が隠れないように */
+}
+.view { max-width: 1100px; margin: 0 auto; padding: 0 12px; }
+#view-message { padding-top: 40px; }
+#view-message h1 { font-size: 22px; color: #1f3864; }
+#view-message p { font-size: 17px; }
+
+/* 上の帯 */
+.bar {
+    position: sticky; top: 0; z-index: 10; background: #1f3864; color: #fff;
+    margin: 0 -12px; padding: 10px 14px; display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+}
+.bar-title { font-size: 20px; font-weight: bold; }
+.bar-title-wrap { flex: 1; min-width: 0; }
+.bar-who { font-size: 14px; opacity: .9; }
+.count { font-size: 16px; font-weight: normal; margin-left: 6px; }
+
+/* 絞り込み */
+.filters { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; padding: 12px 0; }
+.filter { font-weight: bold; font-size: 16px; display: flex; align-items: center; gap: 6px; }
+select, input[type=text], input[type=date] {
+    font-size: 17px; padding: 8px 10px; border: 1px solid #9aa5b5; border-radius: 6px; background: #fff; color: #222;
+    min-height: 44px;
+}
+.filter select { min-width: 180px; }
+
+/* ボタン */
+button { font-family: inherit; cursor: pointer; }
+.btn-sub { font-size: 15px; padding: 8px 14px; border: 1px solid #1f3864; color: #1f3864; background: #fff; border-radius: 6px; min-height: 44px; }
+.btn-back { font-size: 16px; padding: 8px 12px; border: 1px solid #fff; color: #fff; background: transparent; border-radius: 6px; min-height: 44px; }
+.btn-save {
+    font-size: 19px; font-weight: bold; padding: 12px 24px; border: none; border-radius: 8px;
+    background: #1f3864; color: #fff; min-height: 52px; min-width: 200px;
+}
+.btn-save:disabled { background: #aab3c0; cursor: default; }
+
+/* お知らせ */
+.notice { margin: 10px 0; padding: 12px 14px; border-radius: 6px; font-size: 16px; }
+.notice-error { background: #fdecea; border: 1px solid #c0392b; color: #8e1b10; }
+.notice-warn { background: #fff6e0; border: 1px solid #d39e00; color: #6b4d00; }
+.notice-ok { background: #e8f5e9; border: 1px solid #2e7d32; color: #1b5e20; }
+.notice .btn-sub { margin-top: 8px; }
+
+/* ① 一覧 */
+.list { display: grid; grid-template-columns: 1fr; gap: 10px; }
+@media (min-width: 760px) { .list { grid-template-columns: 1fr 1fr; } }
+.loading, .empty { padding: 24px 4px; font-size: 17px; color: #555; }
+.car {
+    display: block; width: 100%; text-align: left; background: #fff; border: 1px solid #c9d1dc; border-radius: 8px;
+    padding: 12px 14px; font-size: 16px; color: #222;
+}
+.car:hover, .car:focus { border-color: #1f3864; outline: none; box-shadow: 0 0 0 2px rgba(31,56,100,.2); }
+.car-head { display: flex; flex-wrap: wrap; gap: 4px 10px; align-items: baseline; }
+.car-name { font-size: 19px; font-weight: bold; }
+.car-model { font-size: 16px; color: #333; }
+.car-plan { margin-top: 4px; }
+.left { display: inline-block; margin-left: 6px; padding: 0 8px; border-radius: 10px; background: #e7ecf4; color: #1f3864; font-weight: bold; }
+.left.soon { background: #fff1d6; color: #8a5a00; }
+.left.over { background: #fdecea; color: #b0281a; }
+.car-prog { display: flex; align-items: center; gap: 10px; margin-top: 8px; }
+.pbar { flex: 1; max-width: 260px; height: 12px; border: 1px solid #8090a8; border-radius: 6px; background: #fff; overflow: hidden; display: block; }
+.pbar > span { display: block; height: 100%; background: #1f3864; }
+.prog-num { font-weight: bold; color: #1f3864; font-size: 17px; }
+.car-sub { margin-top: 6px; font-size: 14px; color: #555; }
+
+/* ② 1台の画面 */
+.items { display: grid; grid-template-columns: 1fr; gap: 8px; padding-top: 12px; }
+@media (min-width: 900px) { .items { grid-template-columns: 1fr 1fr; } }
+.item {
+    background: #fff; border: 1px solid #d3d9e2; border-radius: 8px; padding: 10px 12px;
+    display: flex; flex-direction: column; gap: 6px;
+}
+.item-label { font-weight: bold; font-size: 16px; }
+@media (min-width: 520px) {
+    .item { flex-direction: row; align-items: center; }
+    .item-label { flex: 0 0 150px; }
+}
+.item-label small { display: block; font-weight: normal; font-size: 13px; color: #666; }
+.item-input { flex: 1; display: flex; flex-wrap: wrap; gap: 8px; align-items: center; min-width: 0; }
+.item-input input[type=text] { width: 100%; }
+.item-input select { min-width: 200px; max-width: 100%; }
+.ro { font-size: 17px; color: #333; }
+.item-display, .item-number, .item-toss { background: #f7f8fa; }
+.clear { font-size: 14px; padding: 6px 10px; border: 1px solid #9aa5b5; background: #fff; border-radius: 6px; min-height: 40px; }
+.check { display: flex; align-items: center; gap: 8px; font-size: 17px; }
+.check input { width: 28px; height: 28px; }
+.pills { display: flex; flex-wrap: wrap; gap: 6px; }
+.pill {
+    font-size: 17px; padding: 8px 16px; min-height: 44px; border: 1px solid #1f3864; border-radius: 22px;
+    background: #fff; color: #1f3864;
+}
+.pill.on { background: #1f3864; color: #fff; font-weight: bold; }
+
+/* 保存の帯（下に固定） */
+.save-bar {
+    position: fixed; left: 0; right: 0; bottom: 0; z-index: 20; background: #fff; border-top: 2px solid #c9d1dc;
+    padding: 10px 14px; display: flex; flex-wrap: wrap; gap: 10px; align-items: center; justify-content: flex-end;
+}
+.editor { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; flex: 1; min-width: 240px; }
+.editor label { font-weight: bold; }
+.editor input { flex: 1; min-width: 160px; max-width: 320px; }
+.editor-last { width: 100%; font-size: 13px; color: #666; }
+@media (max-width: 519px) { .btn-save { width: 100%; } }
+
+/* sandbox / 本番の目印（右上の隅に小さく。下は保存の帯があるので上に置く） */
+.env-badge {
+    position: fixed; right: 6px; top: 4px; z-index: 30; font-size: 12px; padding: 1px 8px; border-radius: 10px;
+    opacity: .9; pointer-events: none;
+}
+.env-sandbox { background: #ffe08a; color: #5a4300; border: 1px solid #c9a300; }
+.env-prod { background: #e0e4ea; color: #333; border: 1px solid #9aa5b5; }
+.env-unknown { background: #fff; color: #888; border: 1px dashed #aaa; }
