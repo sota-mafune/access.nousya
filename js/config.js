@@ -65,8 +65,8 @@ var NOUSYA_CONFIG = {
         // 担当は「すべての担当」を出しているときと管理者だけ、店舗は管理者だけ表の列に出す（1台の画面には常に出す）
         { key: "staff", label: "担当", api: "field4", kind: "text", maxLength: 255, gridWhen: "allStaff" },
         { key: "store", label: "店舗", api: "field5", kind: "text", maxLength: 255, gridWhen: "admin" },
-        // 仕入No は重複不可（同じ値があると CRM が保存を断る）。JOCAR の取り込みはこの値で既存の車両を上書きする
-        { key: "stockNo", label: "仕入NO", api: "No", kind: "text", maxLength: 255 },
+        // 仕入No は表示だけ（11/20 決定）。商談・付帯品との紐づけと JOCAR の取り込みがこの値で照合するので、手で変えると紐づけがずれる
+        { key: "stockNo", label: "仕入NO", api: "No", kind: "display" },
         { key: "deliveryStage", label: "納車ステージ", api: "DeliveryStage", kind: "pick", options: ["登録書類待ち", "登録提出", "登録済み", "納車日確定待ち", "納車整備完了", "納車準備完了", "納車完了"] },
         { key: "category", label: "区分", api: "field50", kind: "display" },
         { key: "newCarOrder", label: "新車発注", api: "field31", kind: "date", count: true, done: [], when: { field50: ["新車"] } },
