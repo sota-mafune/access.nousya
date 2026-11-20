@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>納車行程管理</title>
     <!-- 版を変えたら ?v= を変える（GitHub Pages は index.html を最大10分キャッシュする） -->
-    <link rel="stylesheet" href="./css/style.css?v=20261120j">
+    <link rel="stylesheet" href="./css/style.css?v=20261120k">
     <script src="https://live.zwidgets.com/js-sdk/1.2/ZohoEmbededAppSDK.min.js"></script>
 </head>
 <body>
@@ -47,6 +47,17 @@
             </div>
         </header>
         <div id="detail-notice" class="notice" hidden></div>
+        <section id="tasks" class="tasks" hidden>
+            <div class="tasks-head">タスク <span id="tasks-count" class="tasks-count"></span></div>
+            <div id="tasks-msg" class="notice" hidden></div>
+            <div id="tasks-list" class="tasks-list"></div>
+            <div class="task-add">
+                <label class="task-f task-f-subj">件名<input type="text" id="task-subject" maxlength="255" autocomplete="off" placeholder="例: 車庫証明の書類を受け取る"></label>
+                <label class="task-f">期限<input type="date" id="task-due"></label>
+                <label class="task-f">誰の分<input type="text" id="task-who" list="staff-names" maxlength="100" autocomplete="off" placeholder="お名前"></label>
+                <button type="button" id="task-add" class="btn-sub">タスクを足す</button>
+            </div>
+        </section>
         <div id="items" class="items"></div>
         <div id="save-bar" class="save-bar" hidden>
             <div id="editor-wrap" class="editor" hidden>
@@ -61,7 +72,7 @@
 
     <div id="env-badge" class="env-badge" hidden></div>
 
-    <script src="./js/config.js?v=20261120j"></script>
-    <script src="./js/app.js?v=20261120j"></script>
+    <script src="./js/config.js?v=20261120k"></script>
+    <script src="./js/app.js?v=20261120k"></script>
 </body>
 </html>

@@ -180,6 +180,32 @@ table.grid .cell-editor.bad { border-color: #d32f2f; background: #fdecea; }
 table.grid td.c-changed { background: #e3ecff; transition: background .4s; }
 .car.car-changed, .item.item-changed { background: #e3ecff; transition: background .4s; }
 
+/* タスク（v=20261120k）。期限切れは赤 */
+table.grid td.c-task { color: #1f3864; font-weight: bold; }
+table.grid td.c-task.c-task-over { color: #b0281a; background: #fdecea; }
+.row-open { font-size: 13px; padding: 2px 8px; margin-right: 6px; border: 1px solid #1f3864; color: #1f3864; background: #fff; border-radius: 4px; min-height: 28px; }
+.car-task { margin-top: 6px; font-size: 15px; color: #1f3864; font-weight: bold; }
+.car-task.over { color: #b0281a; }
+.tasks { margin-top: 12px; background: #fff; border: 1px solid #d3d9e2; border-radius: 8px; padding: 10px 12px; }
+.tasks.busy { opacity: .6; }
+.tasks-head { font-weight: bold; font-size: 17px; color: #1f3864; }
+.tasks-count { font-weight: normal; font-size: 15px; color: #444; margin-left: 6px; }
+.task-row { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 14px; padding: 8px 0; border-bottom: 1px solid #eef1f5; }
+.task-subj { font-weight: bold; flex: 1 1 220px; min-width: 0; overflow-wrap: anywhere; }
+.task-due, .task-who, .task-st { font-size: 15px; color: #444; }
+.task-over .task-due { color: #b0281a; font-weight: bold; }
+.task-done { color: #777; }
+.task-done .task-subj { font-weight: normal; text-decoration: line-through; color: #777; }
+.task-done-btn { min-height: 36px; padding: 4px 12px; }
+.task-none, .task-err { padding: 8px 0; color: #555; }
+.task-err { color: #8e1b10; }
+.task-sub { margin-top: 10px; font-size: 14px; color: #555; font-weight: bold; }
+.task-add { display: flex; flex-wrap: wrap; gap: 8px 12px; align-items: flex-end; margin-top: 10px; padding-top: 10px; border-top: 1px dashed #c9d1dc; }
+.task-f { display: flex; flex-direction: column; gap: 2px; font-size: 14px; font-weight: bold; }
+.task-f-subj { flex: 1 1 260px; }
+.task-f input { font-weight: normal; }
+.tasks.item-changed { background: #e3ecff; transition: background .4s; }
+
 /* 同じ項目で止まったときの選び直し */
 table.grid td.c-head-rs { min-width: 300px; max-width: 360px; vertical-align: top; }
 .rs { margin-top: 6px; padding: 6px 8px; border: 1px solid #d32f2f; border-radius: 6px; background: #fff; font-size: 14px; color: #222; }

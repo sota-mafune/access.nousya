@@ -34,6 +34,7 @@
         gridMode: false,       // 広い画面で表を出しているか
         gridView: [], gridCols: [], active: null, editing: null,
         tossInList: true,
+        taskSum: null,         // 受注車両の id → { n: 未完了の件数, due: いちばん近い期限 }。読めなければ null（表は「—」）
         lastRefresh: 0, refreshSkip: "", refreshSeq: 0, refreshing: false, flashChanged: {},
         cur: null              // 開いている1台: { id, base, toss, values, seq }
     };
@@ -291,13 +292,17 @@
         if (seq !== state.listSeq) return; // 後から始まった読み込み・1台の画面がある
         state.listLoading = false;
         state.tossInList = got.toss;
+        state.taskSum = got.tasks;
         state.rows = got.rows;
         state.rows.forEach(function (r) { r.__gen = seq; });
         state.meta = {};          // 表の行ごとの入力・保存の状態（読み直したら空にする。未保存があれば先に画面で確かめている）
         state.listStale = false;
         markRefreshed();
         fillSelectors();
-        if (!state.tossInList) setNotice("list-notice", "warn", "保険トス（商談）を一覧では読めませんでした。1台の画面では表示します。");
+        var warns = [];
+        if (!state.tossInList) warns.push("保険トス（商談）を一覧では読めませんでした。1台の画面では表示します。");
+        if (taskCfg() && !state.taskSum) warns.push("タスクを一覧では読めませんでした（「—」と表示）。1台の画面で確かめてください。");
+        if (warns.length) setNotice("list-notice", "warn", warns.map(esc).join("<br>"));
         renderList();
         if (keepPos && state.gridMode) {
             var wrap1 = $("grid-wrap");
@@ -322,7 +327,86 @@
             toss = false;
             rows = await coqlAll(where, false);
         }
-        return { rows: rows.filter(function (r) { return !normBool(r[CFG.doneField]); }), toss: toss };
+        rows = rows.filter(function (r) { return !normBool(r[CFG.doneField]); });
+        // タスク（未完了の件数・いちばん近い期限）。読めなくても車の一覧は出す（列は「—」）
+        var tasks = null;
+        try { tasks = await fetchTaskSummary(rows); } catch (eTask) { tasks = null; }
+        return { rows: rows, toss: toss, tasks: tasks };
+    }
+
+    // ---------------------------------------------------------------- タスク（CRM 標準の Tasks）
+    // 受注車両にひも付いた未完了のタスクを COQL で読み、車ごとに件数といちばん近い期限にまとめる。
+    // 台数が少なければ What_Id in (50台ずつ) で（実測: in は 50 個まで）、多ければ受注車両ひも付きの未完了を
+    // まとめて読み、手元で今の一覧の車に絞る（回数を抑える）。どちらも 200 件ずつ読む
+    function taskCfg() { return CFG.tasks || null; }
+    function idOnly(v) { return String(v || "").replace(/[^0-9]/g, ""); }
+    async function coqlPaged(base, cap) {
+        var out = [], offset = 0;
+        while (true) {
+            var res = await ZOHO.CRM.API.coql({ select_query: base + " limit " + offset + ", " + PAGE });
+            if (res && Array.isArray(res.data)) {
+                out = out.concat(res.data);
+                if (res.info && res.info.more_records) {
+                    offset += PAGE;
+                    if (offset >= cap) throw new Error("タスクが多すぎて読み切れません");
+                    continue;
+                }
+                return out;
+            }
+            if (res && typeof res === "object" && (res.code || res.status === "error" || res.message)) throw res;
+            if (offset === 0 && isEmptyResponse(res)) return out;
+            throw new Error("タスクの応答が想定外の形でした");
+        }
+    }
+    async function fetchTaskSummary(rows) {
+        var T = taskCfg();
+        if (!T) return null;
+        var want = {}, ids = [];
+        rows.forEach(function (r) { var i = idOnly(r.id); if (i && !want[i]) { want[i] = true; ids.push(i); } });
+        var sum = {};
+        if (!ids.length) return sum;
+        var open = "Status != '" + T.doneStatus.replace(/'/g, "") + "'";
+        var cols = "select id, What_Id, Due_Date from " + T.module + " where ";
+        var tasks = [];
+        var inMax = T.inMax || 50;
+        if (ids.length <= inMax * (T.inChunksMax || 5)) {
+            for (var i = 0; i < ids.length; i += inMax) {
+                var part = ids.slice(i, i + inMax).map(function (x) { return "'" + x + "'"; }).join(", ");
+                tasks = tasks.concat(await coqlPaged(cols + "(What_Id in (" + part + ") and " + open + ") order by id asc", MAX_ROWS));
+            }
+        } else {
+            tasks = await coqlPaged(cols + "($se_module = '" + CFG.module + "' and " + open + ") order by id asc", MAX_ROWS);
+        }
+        tasks.forEach(function (t) {
+            var w = t.What_Id, wid = idOnly(w && typeof w === "object" ? w.id : w);
+            if (!wid || !want[wid]) return;
+            var s = sum[wid] || (sum[wid] = { n: 0, due: "" });
+            s.n++;
+            var d = dateOnly(t.Due_Date);
+            if (d && (!s.due || d < s.due)) s.due = d;
+        });
+        return sum;
+    }
+    // 説明（Description）の先頭行の「担当: 名前」から誰の分かを読む
+    function taskWho(desc) {
+        var first = String(desc || "").split(/\r?\n/)[0];
+        var mt = /^\s*担当\s*[:：]\s*(.*)$/.exec(first);
+        return mt ? mt[1].trim() : "";
+    }
+    // 表・カードに出す「N 件／期限」。読めなければ「—」、0 件は空
+    function taskSumOf(id) {
+        if (!state.taskSum) return null;
+        return state.taskSum[idOnly(id)] || { n: 0, due: "" };
+    }
+    function taskSumText(id) {
+        var s = taskSumOf(id);
+        if (!s) return "—";
+        if (!s.n) return "";
+        return s.n + " 件" + (s.due ? "／" + fmtSlash(s.due) : "");
+    }
+    function taskOverdue(id) {
+        var s = taskSumOf(id);
+        return !!(s && s.n && s.due && s.due < todayStr());
     }
 
     function fillSelectors() {
@@ -416,6 +500,7 @@
             var sub = [];
             if (state.staff === "" || state.isAdmin) sub.push("担当 " + (norm(r[CFG.staffField]) || "なし"));
             if (state.isAdmin) sub.push(norm(r[CFG.storeField]) || "店舗なし");
+            var tt = taskCfg() ? taskSumText(r.id) : "";
             var chg = state.flashChanged && state.flashChanged[r.id] && Object.keys(state.flashChanged[r.id]).some(function (k) { return state.flashChanged[r.id][k] > Date.now(); }) ? " car-changed" : "";
             h += "<button type='button' class='car" + chg + "' data-id='" + esc(r.id) + "'>" +
                 "<div class='car-head'><span class='car-name'>" + esc(norm(r[CFG.customerField]) || "（お客様名なし）") + "</span>" +
@@ -424,6 +509,7 @@
                 (left ? " <span class='left " + leftCls + "'>" + esc(left) + "</span>" : "") + "</div>" +
                 "<div class='car-prog'><span class='pbar'><span style='width:" + pct + "%'></span></span>" +
                 "<span class='prog-num'>" + p.n + "/" + p.m + "</span></div>" +
+                (tt ? "<div class='car-task" + (taskOverdue(r.id) ? " over" : "") + "'>タスク " + esc(tt) + (taskOverdue(r.id) ? "（期限切れ）" : "") + "</div>" : "") +
                 (sub.length ? "<div class='car-sub'>" + esc(sub.join("　")) + "</div>" : "") +
                 "</button>";
         });
@@ -503,6 +589,8 @@
             if (f.gridWhen === "allStaff" && !(state.staff === "" || state.isAdmin)) return;
             if (f.gridWhen === "admin" && !state.isAdmin) return;
             cols.push({ f: f, label: f.label });
+            // タスク（表示だけ）は車種のすぐ右（固定列の隣）に置く
+            if (f.api === CFG.vehicleField && taskCfg()) cols.push({ tasks: true, label: "タスク" });
         });
         return cols;
     }
@@ -514,7 +602,7 @@
         var cols = state.gridCols;
         var h = "<div class='grid-wrap' id='grid-wrap' tabindex='0' role='grid' aria-label='未納車の表'><table class='grid'><thead><tr>";
         cols.forEach(function (c, ci) {
-            h += "<th class='" + (isSticky(c) ? "sticky" : "") + (c.f && !editable(c.f, {}) && c.f.kind !== "text" ? " th-ro" : "") + "' data-c='" + ci + "'>" + esc(c.label) + "</th>";
+            h += "<th class='" + (isSticky(c) ? "sticky" : "") + ((c.f && !editable(c.f, {}) && c.f.kind !== "text") || c.tasks ? " th-ro" : "") + "' data-c='" + ci + "'>" + esc(c.label) + "</th>";
         });
         h += "</tr></thead><tbody>";
         rows.forEach(function (row, ri) {
@@ -579,7 +667,15 @@
             else if (m && Object.keys(m.edits).length) st = "<span class='st st-dirty'>未保存</span>";
             else if (m && m.status === "saved") st = "<span class='st st-ok'>保存済み</span>";
             if (m && m.needReload) st += " <button type='button' class='row-reload' data-reload='" + esc(row.id) + "'>読み直す</button>";
-            td.innerHTML = "<b class='pn'>" + p.n + "/" + p.m + "</b>" + st;
+            // 1台の画面（タスクの一覧・追加もここ）を開くボタン
+            var openBtn = "<button type='button' class='row-open' data-open='" + esc(row.id) + "' title='この車の画面（タスク）を開く'>開く</button>";
+            td.innerHTML = openBtn + "<b class='pn'>" + p.n + "/" + p.m + "</b>" + st;
+        } else if (c.tasks) {
+            cls.push("ro");
+            cls.push("c-task");
+            if (taskOverdue(row.id)) cls.push("c-task-over");
+            td.textContent = taskSumText(row.id);
+            title = taskOverdue(row.id) ? "期限を過ぎた未完了のタスクがあります" : "未完了のタスクの件数／いちばん近い期限（開くで一覧）";
         } else if (c.extra) {
             cls.push("ro");
             td.textContent = norm(row[c.extra]);
@@ -838,6 +934,13 @@
         if (!state.gridMode) return;
         var t = e.target;
         if (t.classList && t.classList.contains("row-reload")) { e.preventDefault(); reloadRow(t.getAttribute("data-reload")); return; }
+        if (t.classList && t.classList.contains("row-open")) {
+            e.preventDefault();
+            var oid = t.getAttribute("data-open");
+            // 未保存の入力があれば先に画面の中で知らせる（保存してからもう一度「開く」）
+            guardLeave(function () { openCar(oid); }, "この車の画面を開く");
+            return;
+        }
         if (t.classList && t.classList.contains("rs-btn")) { e.preventDefault(); resolveRow(t.getAttribute("data-id"), t.getAttribute("data-api"), t.getAttribute("data-rs")); return; }
         if (t.classList && t.classList.contains("cell-editor")) return; // 編集中の入力欄の中
         var td = t.closest ? t.closest("#grid-wrap td") : null;
@@ -1131,7 +1234,7 @@
         if (!$("view-detail").hidden) {
             var cur = state.cur;
             if (!cur) return "読み込み中のため";
-            if (state.saving) return "保存中のため";
+            if (state.saving || cur.taskBusy) return "保存中のため";
             if (cur.conflicts && Object.keys(cur.conflicts).length) return "選び直しの途中のため";
             if (Object.keys(changedFields()).length) return "保存していない入力があるため";
             return "";
@@ -1166,6 +1269,7 @@
         function on(k) { return !!fl[k] && fl[k] > now; }
         if (on("*")) return true;
         if (c.head) return false;
+        if (c.tasks) return on("__tasks");
         if (c.extra) return on(c.extra);
         return !!(c.f && (c.f.kind === "toss" ? on("__toss") : on(c.f.api)));
     }
@@ -1202,6 +1306,10 @@
                 if (cmpValue(f, o) !== cmpValue(f, nr)) cs[f.api] = true;
             });
             [CFG.staffField, CFG.storeField].forEach(function (k) { if (norm(o[k]) !== norm(nr[k])) cs[k] = true; });
+            if (got.tasks && state.taskSum) {
+                var a0 = state.taskSum[idOnly(nr.id)] || { n: 0, due: "" }, a1 = got.tasks[idOnly(nr.id)] || { n: 0, due: "" };
+                if (a0.n !== a1.n || a0.due !== a1.due) cs.__tasks = true;
+            }
             if (Object.keys(cs).length) changes[nr.id] = cs;
         });
         // 位置を控える
@@ -1218,6 +1326,7 @@
         Object.keys(state.meta || {}).forEach(function (id) { if (!ids[id]) delete state.meta[id]; });
         state.rows = got.rows;
         state.tossInList = got.toss;
+        state.taskSum = got.tasks;
         var until = Date.now() + FLASH_MS, keepFl = {};
         Object.keys(state.flashChanged || {}).forEach(function (id) {
             if (!ids[id]) return;
@@ -1231,6 +1340,7 @@
         });
         state.flashChanged = keepFl;
         markRefreshed();
+        if (taskCfg() && !got.tasks) { state.refreshSkip = "タスクを読めませんでした。列は「—」"; showRefreshInfo(); }
         fillSelectors();
         renderList();
         // 位置を戻す
@@ -1271,6 +1381,8 @@
         }
         state.refreshing = false;
         if (state.cur !== cur || state.viewSeq !== vseq || refreshBlocker()) return;
+        // タスクも一緒に読み直す（足す・完了にする操作が始まっていれば、その後の読み直しに任せる）
+        if (!cur.taskBusy) loadTasks(true);
         var changed = changedFields2(fresh, cur.base);
         var oldLk = cur.base[CFG.deal.lookupField], newLk = fresh[CFG.deal.lookupField];
         var keepToss = cur.toss, editorVal = $("editor-input").value;
@@ -1312,6 +1424,7 @@
         $("detail-sub").textContent = "";
         $("items").innerHTML = "";
         $("save-bar").hidden = true;
+        $("tasks").hidden = true;
         var rec;
         try { rec = await getOne(CFG.module, id); }
         catch (e) {
@@ -1321,9 +1434,190 @@
             return;
         }
         if (seq !== state.viewSeq) return; // 別の車両・一覧に移った
-        state.cur = { id: id, base: rec, toss: null, values: {}, seq: seq };
+        state.cur = { id: id, base: rec, toss: null, values: {}, seq: seq, tasks: null, tasksErr: "", taskSeq: 0, taskBusy: false, whoTouched: false };
         renderDetail();
         loadToss(rec);
+        initTaskForm();
+        loadTasks(false);
+    }
+
+    // ---------------------------------------------------------------- ② の中のタスク
+    // その車のタスク（未完了・完了）を出し、「完了にする」と「タスクを足す」を置く。
+    // 足すのは insertRecord（What_Id = 受注車両の id、$se_module = 受注車両）、完了は updateRecord で状態を完了に。
+    // 担当者（Owner）は今のログインのまま。「誰の分か」は説明の先頭行「担当: 名前」に書く（既定は「入れた方」）。
+    // 送っている間はタスクの欄と「← 一覧」を止める（二重押し防止）。結果は画面の中で知らせる
+    var TASK_DONE_SHOW = 10;   // 完了したタスクは新しい順にこの件数まで出す
+    function taskDefaultWho() {
+        if (editorReady()) { var e = String($("editor-input").value || "").trim(); if (e) return e; }
+        var top = String($("grid-editor").value || "").trim();
+        if (top) return top;
+        if (state.staff && state.staff !== "__none__") return state.staff;
+        return state.cur ? norm(state.cur.base[CFG.staffField]) : "";
+    }
+    function initTaskForm() {
+        var T = taskCfg();
+        $("tasks").hidden = !T;
+        if (!T) return;
+        $("task-subject").value = "";
+        $("task-due").value = "";
+        $("task-who").value = taskDefaultWho();
+        setTaskMsg("", "");
+        $("tasks-count").textContent = "";
+        $("tasks-list").innerHTML = "<div class='loading'>タスクを読んでいます…</div>";
+        setTaskBusy(false);
+    }
+    function setTaskMsg(kind, html) { setNotice("tasks-msg", kind, html); }
+    function setTaskBusy(on) {
+        var cur = state.cur;
+        if (cur) cur.taskBusy = on;
+        $("tasks").classList.toggle("busy", on);
+        $("tasks").querySelectorAll("input, button").forEach(function (el) { el.disabled = on; });
+        $("back-btn").disabled = on || state.saving;
+    }
+    function isDoneTask(t) { return norm(t.Status) === taskCfg().doneStatus; }
+    function updateTaskSum(id, list) {
+        if (!state.taskSum) return;   // 一覧で読めていないときは「—」のまま（読み直すと出る）
+        var s = { n: 0, due: "" };
+        list.forEach(function (t) {
+            if (isDoneTask(t)) return;
+            s.n++;
+            var d = dateOnly(t.Due_Date);
+            if (d && (!s.due || d < s.due)) s.due = d;
+        });
+        state.taskSum[idOnly(id)] = s;
+    }
+    // 読み直す。true = 読めた / false = 読めなかった / null = 別の車・後の読み込みに替わった
+    async function loadTasks(quiet) {
+        var cur = state.cur, T = taskCfg();
+        if (!cur || !T) return null;
+        var seq = ++cur.taskSeq;
+        var list;
+        try {
+            list = await coqlPaged("select id, Subject, Due_Date, Status, Description, Closed_Time from " + T.module +
+                " where What_Id in ('" + idOnly(cur.id) + "') order by id asc", MAX_ROWS);
+        } catch (e) {
+            if (state.cur !== cur || cur.taskSeq !== seq) return null;
+            cur.tasksErr = errText(e);
+            if (!quiet || !cur.tasks) renderTasks();
+            else { state.refreshSkip = "タスクを読み直せませんでした（" + cur.tasksErr + "）"; showRefreshInfo(); }
+            return false;
+        }
+        if (state.cur !== cur || cur.taskSeq !== seq) return null;
+        var before = JSON.stringify(cur.tasks || null);
+        cur.tasks = list;
+        cur.tasksErr = "";
+        updateTaskSum(cur.id, list);
+        renderTasks();
+        if (quiet && before !== "null" && before !== JSON.stringify(list)) {
+            var box = $("tasks");
+            box.classList.add("item-changed");
+            setTimeout(function () { box.classList.remove("item-changed"); }, FLASH_MS);
+        }
+        return true;
+    }
+    function renderTasks() {
+        var cur = state.cur, T = taskCfg();
+        if (!cur || !T) return;
+        if (!cur.tasks) {
+            $("tasks-count").textContent = "";
+            $("tasks-list").innerHTML = cur.tasksErr
+                ? "<div class='task-err'>タスクを読めませんでした（" + esc(cur.tasksErr) + "）。 <button type='button' class='btn-sub' id='task-reload'>読み直す</button></div>"
+                : "<div class='loading'>タスクを読んでいます…</div>";
+            setTaskBusy(cur.taskBusy);
+            return;
+        }
+        var today = todayStr();
+        var open = cur.tasks.filter(function (t) { return !isDoneTask(t); }).sort(function (a, b) {
+            var da = dateOnly(a.Due_Date), db = dateOnly(b.Due_Date);
+            if (da && !db) return -1;
+            if (!da && db) return 1;
+            if (da !== db) return da < db ? -1 : 1;
+            return String(a.id) < String(b.id) ? -1 : 1;
+        });
+        var done = cur.tasks.filter(isDoneTask).sort(function (a, b) {
+            var ca = norm(a.Closed_Time), cb = norm(b.Closed_Time);
+            return ca === cb ? 0 : (ca < cb ? 1 : -1);
+        });
+        $("tasks-count").textContent = "未完了 " + open.length + " 件" + (done.length ? "・完了 " + done.length + " 件" : "");
+        function rowHtml(t, isOpen) {
+            var d = dateOnly(t.Due_Date), over = isOpen && d && d < today;
+            var who = taskWho(t.Description);
+            return "<div class='task-row" + (isOpen ? "" : " task-done") + (over ? " task-over" : "") + "'>" +
+                "<span class='task-subj'>" + esc(norm(t.Subject) || "（件名なし）") + "</span>" +
+                "<span class='task-due'>" + (d ? "期限 " + esc(fmtDate(d)) + (over ? "（期限切れ）" : "") : "期限なし") + "</span>" +
+                "<span class='task-who'>" + (who ? esc(who) + " の分" : "誰の分か未記入") + "</span>" +
+                "<span class='task-st'>" + esc(norm(t.Status)) + (!isOpen && norm(t.Closed_Time) ? "（" + esc(fmtDateTime(t.Closed_Time)) + "）" : "") + "</span>" +
+                (isOpen ? "<button type='button' class='btn-sub task-done-btn' data-task='" + esc(t.id) + "'>完了にする</button>" : "") +
+                "</div>";
+        }
+        var h = "";
+        if (!open.length) h += "<div class='task-none'>未完了のタスクはありません。</div>";
+        open.forEach(function (t) { h += rowHtml(t, true); });
+        if (done.length) {
+            h += "<div class='task-sub'>完了したタスク" + (done.length > TASK_DONE_SHOW ? "（新しい " + TASK_DONE_SHOW + " 件）" : "") + "</div>";
+            done.slice(0, TASK_DONE_SHOW).forEach(function (t) { h += rowHtml(t, false); });
+        }
+        $("tasks-list").innerHTML = h;
+        setTaskBusy(cur.taskBusy);   // 描き直したボタンにも止めを効かせる
+    }
+    async function addTask() {
+        var cur = state.cur, T = taskCfg();
+        if (!cur || !T || cur.taskBusy) return;
+        var subj = String($("task-subject").value || "").trim();
+        if (!subj) { setTaskMsg("warn", "件名を入れてください。"); $("task-subject").focus(); return; }
+        var due = String($("task-due").value || "").trim();
+        if (due && !/^\d{4}-\d{2}-\d{2}$/.test(due)) { setTaskMsg("warn", "期限の日付が読めません。選び直してください。"); return; }
+        var who = String($("task-who").value || "").trim();
+        var data = { Subject: subj, Status: T.openStatus, What_Id: String(cur.id), $se_module: CFG.module };
+        if (due) data.Due_Date = due;
+        if (who) data.Description = T.whoPrefix + who;
+        setTaskMsg("", "");
+        setTaskBusy(true);
+        try {
+            var res = await ZOHO.CRM.API.insertRecord({ Entity: T.module, APIData: data, Trigger: CFG.trigger });
+            var r0 = res && res.data && res.data[0];
+            if (!r0 || String(r0.code || "").toUpperCase() !== "SUCCESS") throw (r0 || res || "応答がありませんでした");
+        } catch (e) {
+            if (state.cur !== cur) return;
+            setTaskBusy(false);
+            setTaskMsg("error", "タスクを足せませんでした（" + esc(errText(e)) + "）。入れた内容は残っています。もう一度押してください。");
+            return;
+        }
+        // ここから先は CRM に入った後
+        if (state.cur !== cur) return;
+        $("task-subject").value = "";
+        $("task-due").value = "";
+        var ok = await loadTasks(true);
+        if (state.cur !== cur) return;
+        setTaskBusy(false);
+        if (ok) setTaskMsg("ok", "タスクを足しました（" + esc(subj) + "）。");
+        else { state.listStale = true; setTaskMsg("warn", "タスクを足しました（" + esc(subj) + "）。ただし、タスクの一覧を読み直せませんでした。"); }
+    }
+    async function completeTask(taskId) {
+        var cur = state.cur, T = taskCfg();
+        if (!cur || !T || cur.taskBusy) return;
+        var t = null;
+        (cur.tasks || []).forEach(function (x) { if (String(x.id) === String(taskId)) t = x; });
+        if (!t) return;
+        setTaskMsg("", "");
+        setTaskBusy(true);
+        try {
+            var res = await ZOHO.CRM.API.updateRecord({ Entity: T.module, APIData: { id: String(t.id), Status: T.doneStatus }, Trigger: CFG.trigger });
+            var r0 = res && res.data && res.data[0];
+            if (!r0 || String(r0.code || "").toUpperCase() !== "SUCCESS") throw (r0 || res || "応答がありませんでした");
+        } catch (e) {
+            if (state.cur !== cur) return;
+            setTaskBusy(false);
+            setTaskMsg("error", "完了にできませんでした（" + esc(errText(e)) + "）。もう一度押してください。");
+            return;
+        }
+        if (state.cur !== cur) return;
+        var ok = await loadTasks(true);
+        if (state.cur !== cur) return;
+        setTaskBusy(false);
+        var name = esc(norm(t.Subject) || "件名なし");
+        if (ok) setTaskMsg("ok", "完了にしました（" + name + "）。");
+        else { state.listStale = true; setTaskMsg("warn", "完了にしました（" + name + "）。ただし、タスクの一覧を読み直せませんでした。"); }
     }
 
     async function loadToss(rec) {
@@ -1618,7 +1912,7 @@
         // inert が効かないブラウザ向けに、入力欄とボタンも止める
         items.querySelectorAll("input, select, button").forEach(function (el) { el.disabled = on; });
         $("editor-input").disabled = on;
-        $("back-btn").disabled = on;
+        $("back-btn").disabled = on || !!(state.cur && state.cur.taskBusy);
         var btn = $("save-btn");
         if (on) { btn.disabled = true; btn.textContent = "保存しています…"; }
         else updateDirty();
@@ -1626,7 +1920,7 @@
 
     // 一覧へ戻る。保存していない入力があれば画面の中で確かめる（Zoho の枠の中では window.confirm が出ないことがある）
     function backToList() {
-        if (state.saving) return;
+        if (state.saving || (state.cur && state.cur.taskBusy)) return;
         if (state.cur && Object.keys(changedFields()).length) {
             setNotice("detail-notice", "warn", "保存していない入力があります。一覧に戻ると、入れた内容は消えます。" +
                 "<br><button type='button' class='btn-sub' id='leave-yes'>保存せずに一覧へ戻る</button> " +
@@ -1638,6 +1932,7 @@
     }
     function leaveToList() {
         state.cur = null;
+        $("tasks").hidden = true;
         state.viewSeq++;
         if (state.listStale) loadList(); else { show("view-list"); renderList(); }
     }
@@ -1713,6 +2008,20 @@
                 if (inp) inp.value = "";
                 updateDirty();
             }
+        });
+        // タスク
+        $("task-add").addEventListener("click", addTask);
+        $("task-subject").addEventListener("keydown", function (ev) { if (ev.key === "Enter" && !ev.isComposing && ev.keyCode !== 229) { ev.preventDefault(); addTask(); } });
+        $("task-who").addEventListener("input", function () { if (state.cur) state.cur.whoTouched = true; });
+        // 「誰の分」は、自分で書き換えるまで「入れた方」に合わせる
+        $("editor-input").addEventListener("input", function () {
+            if (state.cur && !state.cur.whoTouched) $("task-who").value = String(this.value || "").trim();
+        });
+        $("tasks").addEventListener("click", function (ev) {
+            var t = ev.target;
+            if (!t || !t.classList) return;
+            if (t.classList.contains("task-done-btn")) completeTask(t.getAttribute("data-task"));
+            else if (t.id === "task-reload" && state.cur && !state.cur.taskBusy) { state.cur.tasksErr = ""; renderTasks(); loadTasks(false); }
         });
         $("items").addEventListener("input", updateDirty);
         $("items").addEventListener("change", updateDirty);
