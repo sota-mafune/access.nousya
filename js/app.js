@@ -1,9 +1,9 @@
 /*
  * 納車行程管理ウィジェット（Zoho CRM の Web タブに置く外部ホストのウィジェット）
  *
- * ① 未納車一覧: ログインしているアカウントが担当（Owner）で、納車完了でない受注車両。納車予定が近い順。
+ * ① 未納車一覧: ログインしているアカウントが担当（Owner）で、納車完了でなく、売却区分に「ＡＡ」を含まない受注車両。納車予定が近い順。
  *    画面の上の「担当」（受注車両の 担当 field4）で絞る。選んだ担当はこの端末に覚える。管理者は全件・店舗でも絞れる。
- * ② 1台の画面: 管理表の列の順に項目を並べ、その場で入れて保存。変えた項目だけを送る。
+ * ② 1台の画面: 本番ビュー「未納車_岩槻店」の列の順（js/config.js）に項目を並べ、その場で入れて保存。変えた項目だけを送る。
  *    送る前に最新を読み直し、開いた後に他で変わっていれば送らない。送った後に読み戻して画面に出す。
  *
  * 項目の対応は js/config.js（NOUSYA_CONFIG）だけに書く。このファイルは会社に依らない。
@@ -34,10 +34,10 @@
         meta: {},              // 表: 行（受注車両の id）ごとの入力・保存の状態
         gridMode: false,       // 広い画面で表を出しているか
         gridView: [], gridCols: [], active: null, editing: null,
-        tossInList: true,
+        namesInList: true,     // 一覧で参照の名前（商談名）を読めたか
         taskSum: null,         // 受注車両の id → { n: 未完了の件数, due: いちばん近い期限 }。読めなければ null（表は「—」）
         lastRefresh: 0, refreshSkip: "", refreshSeq: 0, refreshing: false, flashChanged: {},
-        cur: null              // 開いている1台: { id, base, toss, values, seq }
+        cur: null              // 開いている1台: { id, base, values, seq }
     };
 
     // ---------------------------------------------------------------- 小道具
@@ -218,26 +218,30 @@
 
     // ---------------------------------------------------------------- ① 一覧
     // 一覧（表）で読む項目。表にすべての列を出すので、対応表の項目を全部読む。
-    // withToss: 商談の保険トスを参照の先（field16.field20 など）で一緒に読む（1台ずつ読まないため）
-    function tossKeys() { var d = CFG.deal; return [d.lookupField + "." + d.tossField, d.lookupField + "." + d.naField]; }
-    function listFields(withToss) {
+    // withNames: 参照（商談データ field16）の名前を参照の先（field16.Deal_Name）で一緒に読む。
+    // COQL は参照を id だけで返すため（1台ずつ読まないため）
+    function lookupNameKey(api) { var n = CFG.lookupNames && CFG.lookupNames[api]; return n ? api + "." + n : ""; }
+    function listFields(withNames) {
         var want = ["id", CFG.ownerField, "Modified_Time", CFG.vehicleField, CFG.customerField, CFG.staffField, CFG.storeField,
             CFG.planField, CFG.doneField, CFG.categoryField, CFG.editorField, CFG.editedAtField];
+        if (CFG.excludeContains) want.push(CFG.excludeContains.api);
         CFG.fields.forEach(function (f) {
             if (f.api) want.push(f.api);
             if (f.when) Object.keys(f.when).forEach(function (k) { want.push(k); });
         });
         var seen = {}, out = [];
         want.forEach(function (a) { if (a && !seen[a] && (a === "id" || exists(a))) { seen[a] = true; out.push(a); } });
-        if (withToss && exists(CFG.deal.lookupField)) {
-            if (!seen[CFG.deal.lookupField]) out.push(CFG.deal.lookupField);
-            out = out.concat(tossKeys());
+        if (withNames) {
+            CFG.fields.forEach(function (f) {
+                var k = f.kind === "lookup" && seen[f.api] ? lookupNameKey(f.api) : "";
+                if (k && !seen[k]) { seen[k] = true; out.push(k); }
+            });
         }
         return out;
     }
 
-    async function coqlAll(where, withToss) {
-        var cols = listFields(withToss).join(", ");
+    async function coqlAll(where, withNames) {
+        var cols = listFields(withNames).join(", ");
         var out = [], offset = 0;
         state.truncated = false;
         while (true) {
@@ -293,7 +297,7 @@
         }
         if (seq !== state.listSeq) return; // 後から始まった読み込み・1台の画面がある
         state.listLoading = false;
-        state.tossInList = got.toss;
+        state.namesInList = got.names;
         state.taskSum = got.tasks;
         state.rows = got.rows;
         state.rows.forEach(function (r) { r.__gen = seq; });
@@ -302,7 +306,8 @@
         markRefreshed();
         fillSelectors();
         var warns = [];
-        if (!state.tossInList) warns.push("保険トス（商談）を一覧では読めませんでした。1台の画面では表示します。");
+        if (!state.namesInList) warns.push("商談データ（商談名）を一覧では読めませんでした（「—」と表示）。1台の画面では表示します。");
+        if (!got.exServer) warns.push("売却区分（ＡＡ）の絞り込みを CRM 側でできなかったため、読んだ後に外しています。");
         if (taskCfg() && !state.taskSum) warns.push("タスクを一覧では読めませんでした（「—」と表示）。1台の画面で確かめてください。");
         if (warns.length) setNotice("list-notice", "warn", warns.map(esc).join("<br>"));
         renderList();
@@ -316,20 +321,39 @@
         // （上限で切れて自分の車が黙って落ちるため）。エラーとして出す
         var where = state.isAdmin ? notDone
             : notDone + " and " + CFG.ownerField + " = '" + String(state.user.id).replace(/[^0-9]/g, "") + "'";
-        var rows, toss = true;
-        try {
-            rows = await coqlAll(where, true);
-        } catch (eToss) {
-            // 保険トス（商談の参照の先）を一緒に読めなければ、それを外して読み直す（表の保険トスの列は「—」）。
-            // 行の絞り込みは同じなので、車が欠けることはない
-            toss = false;
-            rows = await coqlAll(where, false);
+        // 売却区分に「ＡＡ」を含むものを外す（本番ビュー「未納車_岩槻店」の not_contains）。
+        // 空の車両は出したいので is null を or で明示する（COQL の not like が空をどう扱うかに頼らない）。
+        // not like は % を両端に付けたときだけ「含まない」になる
+        var ex = CFG.excludeContains, exWhere = "";
+        if (ex && exists(ex.api)) {
+            var lit = String(ex.value).replace(/'/g, "\\'");
+            exWhere = " and (" + ex.api + " is null or " + ex.api + " not like '%" + lit + "%')";
         }
-        rows = rows.filter(function (r) { return !normBool(r[CFG.doneField]); });
+        // 読み方は順に試す: ①商談名も・ＡＡも CRM で ②商談名を外す ③ＡＡを手元で ④両方とも外す。
+        // 外したものは表示（「—」）と手元の絞り込みで補うので、行の絞り込み（納車完了・担当者）は同じで車は欠けない
+        var tries = [{ n: true, x: true }, { n: false, x: true }, { n: true, x: false }, { n: false, x: false }];
+        if (!exWhere) tries = [{ n: true, x: false }, { n: false, x: false }];
+        var rows = null, used = null, lastErr = null;
+        for (var i = 0; i < tries.length; i++) {
+            try {
+                rows = await coqlAll(where + (tries[i].x ? exWhere : ""), tries[i].n);
+                used = tries[i];
+                break;
+            } catch (e) { lastErr = e; }
+        }
+        if (!used) throw lastErr;
+        rows = rows.filter(function (r) { return !normBool(r[CFG.doneField]) && !excludedRow(r); });
         // タスク（未完了の件数・いちばん近い期限）。読めなくても車の一覧は出す（列は「—」）
         var tasks = null;
         try { tasks = await fetchTaskSummary(rows); } catch (eTask) { tasks = null; }
-        return { rows: rows, toss: toss, tasks: tasks };
+        return { rows: rows, names: used.n, exServer: !exWhere || used.x, tasks: tasks };
+    }
+    // 一覧から外す車両か（売却区分に「ＡＡ」を含む）。CRM 側で絞れなかったときもここで外す
+    function excludedRow(r) {
+        var ex = CFG.excludeContains;
+        if (!ex || !exists(ex.api)) return false;
+        var v = norm(r[ex.api]);
+        return typeof v === "string" && v.indexOf(ex.value) !== -1;
     }
 
     // ---------------------------------------------------------------- タスク（CRM 標準の Tasks）
@@ -514,7 +538,7 @@
             var tt = taskCfg() ? taskSumText(r.id) : "";
             var chg = state.flashChanged && state.flashChanged[r.id] && Object.keys(state.flashChanged[r.id]).some(function (k) { return state.flashChanged[r.id][k] > Date.now(); }) ? " car-changed" : "";
             h += "<button type='button' class='car" + chg + "' data-id='" + esc(r.id) + "'>" +
-                "<div class='car-head'><span class='car-name'>" + esc(norm(r[CFG.customerField]) || "（お客様名なし）") + "</span>" +
+                "<div class='car-head'><span class='car-name'>" + esc(norm(r[CFG.customerField]) || "（顧客名なし）") + "</span>" +
                 "<span class='car-model'>" + esc(norm(r[CFG.vehicleField])) + "</span></div>" +
                 "<div class='car-plan'>納車予定 <b>" + esc(plan ? fmtDate(plan) : "未定") + "</b>" +
                 (left ? " <span class='left " + leftCls + "'>" + esc(left) + "</span>" : "") + "</div>" +
@@ -529,7 +553,7 @@
 
     // ---------------------------------------------------------------- ①' 表（広い画面。Excel のように入れる）
     //
-    // 1行＝受注車両1台、列＝管理表の列の順（js/config.js の fields）。行頭に進み具合と保存の状態。
+    // 1行＝受注車両1台、列＝本番ビュー「未納車_岩槻店」の列の順（js/config.js の fields）。行頭に進み具合と保存の状態。
     // 操作: セルを押す / Enter / F2 で編集、Tab・Shift+Tab で左右、Enter・矢印で上下、Esc で取り消し、
     //       チェックは Space（選んでいるチェックのセルをもう一度押しても切り替わる）、Delete で空にする。
     // 保存は自動: 行を抜けたとき、または確定から AUTOSAVE_MS 後に、その行の変えたセルだけを送る。
@@ -582,25 +606,32 @@
         if (dt.getFullYear() !== y || dt.getMonth() !== m - 1 || dt.getDate() !== d) return null;
         return y + "-" + pad2(m) + "-" + pad2(d);
     }
-    function tossText(row) {
-        var d = CFG.deal, lk = row[d.lookupField];
-        if (!state.tossInList) return "—";
-        if (!lk || (typeof lk === "object" && !lk.id)) return "（紐づけなし）";
-        if (row.__tossStale) return "（読み直すと表示）";
-        if (normBool(row[d.lookupField + "." + d.naField])) return "対象外";
-        var t = dateOnly(row[d.lookupField + "." + d.tossField]);
-        return t ? fmtSlash(t) : "未";
+    // 参照（商談データ）の表示: getRecord で読んだ行は { name, id }、一覧の COQL で読んだ行は id だけなので
+    // 参照の先（field16.Deal_Name）を見る。紐づけが無ければ空、名前を読めていなければ「—」
+    function lookupId(row, api) {
+        var lk = row[api];
+        if (!lk) return "";
+        if (typeof lk === "object") return lk.id ? String(lk.id) : "";
+        return String(lk);
+    }
+    function lookupText(row, api) {
+        if (!lookupId(row, api)) return "";
+        var lk = row[api];
+        if (lk && typeof lk === "object" && lk.name) return String(lk.name);
+        var k = lookupNameKey(api);
+        if (k && Object.prototype.hasOwnProperty.call(row, k)) return norm(row[k]);
+        return "—";
     }
 
     function gridCols() {
         var cols = [{ head: true, label: "進み具合" }];
         CFG.fields.forEach(function (f) {
-            if (f.kind !== "toss" && !exists(f.api)) return;
-            // 担当（すべての担当を出しているときと管理者）・店舗（管理者）は条件つきで列に出す
-            if (f.gridWhen === "allStaff" && !(state.staff === "" || state.isAdmin)) return;
+            if (!exists(f.api)) return;
+            // 店舗（管理者だけ）・仕入No（表に出さない）は条件つき
+            if (f.gridWhen === "never") return;
             if (f.gridWhen === "admin" && !state.isAdmin) return;
             cols.push({ f: f, label: f.label });
-            // タスク（表示だけ）は車種のすぐ右（固定列の隣）に置く
+            // タスク（表示だけ）は受注車両のすぐ右（固定列の隣）に置く
             if (f.api === CFG.vehicleField && taskCfg()) cols.push({ tasks: true, label: "タスク" });
         });
         return cols;
@@ -628,7 +659,7 @@
         updateGridStatus();
     }
 
-    // 左の固定列（行頭・お客様名・車種）の left を、実際の幅から決める
+    // 左の固定列（行頭・顧客名・受注車両）の left を、実際の幅から決める
     function placeSticky() {
         var table = document.querySelector("#grid-wrap table");
         if (!table) return;
@@ -656,7 +687,7 @@
         });
         schedulePlaceSticky();
     }
-    // 固定列（お客様名・車種）は入力で幅が変わるので、描き直したら次の描画の前に位置を合わせ直す（何行描いても1回）
+    // 固定列（顧客名・受注車両）は入力で幅が変わるので、描き直したら次の描画の前に位置を合わせ直す（何行描いても1回）
     var stickyQueued = false;
     function schedulePlaceSticky() {
         if (stickyQueued) return;
@@ -692,7 +723,7 @@
             td.textContent = norm(row[c.extra]);
         } else {
             var f = c.f;
-            if (f.kind === "toss") { cls.push("ro"); text = tossText(row); }
+            if (f.kind === "lookup") { cls.push("ro"); text = lookupText(row, f.api); }
             else if (f.kind === "display") { cls.push("ro"); text = f.date ? fmtSlash(dateOnly(row[f.api])) : norm(row[f.api]); }
             else if (f.kind === "number") {
                 cls.push("ro"); text = norm(row[f.api]);
@@ -1007,7 +1038,7 @@
     function changedFields2(a, b) {
         var out = [];
         CFG.fields.forEach(function (f) {
-            if (!f.api || f.kind === "toss" || !exists(f.api)) return;
+            if (!f.api || !exists(f.api)) return;
             if (cmpValue(f, a) !== cmpValue(f, b)) out.push(f);
         });
         return out;
@@ -1017,15 +1048,13 @@
         return fs.filter(function (f) { return f.kind === "date" || f.kind === "pick" || f.kind === "text" || f.kind === "bool"; })
             .map(function (f) { return f.label; });
     }
-    // CRM から読んだレコードで行の基準を差し替える（保険トスは一覧で読んだ値を、商談の紐づけが同じなら残す）
+    // CRM から読んだレコードで行の基準を差し替える（getRecord の参照は名前も持つので、一覧で読んだ参照の先の名前は捨てる）
     function adoptRecord(row, rec) {
-        var keep = {};
-        tossKeys().concat([CFG.deal.lookupField]).forEach(function (k) { keep[k] = row[k]; });
         Object.keys(rec).forEach(function (k) { if (k !== "__gen") row[k] = rec[k]; });
-        var lk = rec[CFG.deal.lookupField], oldLk = keep[CFG.deal.lookupField];
-        if (lk && oldLk && lk.id === oldLk.id) tossKeys().forEach(function (k) { row[k] = keep[k]; });
-        else if (!lk) tossKeys().forEach(function (k) { row[k] = null; });
-        else row.__tossStale = true; // 紐づく商談が変わった: 一覧を読み直すまで分からない
+        dropLookupNames(row);
+    }
+    function dropLookupNames(row) {
+        CFG.fields.forEach(function (f) { var k = f.kind === "lookup" ? lookupNameKey(f.api) : ""; if (k) delete row[k]; });
     }
 
     async function saveRow(row) {
@@ -1150,10 +1179,8 @@
         try {
             var fresh = await getOne(CFG.module, row.id);
             if (row.__gen !== gen) return;
-            var keep = {};
-            tossKeys().forEach(function (k) { keep[k] = row[k]; });
             Object.keys(fresh).forEach(function (k) { row[k] = fresh[k]; });
-            tossKeys().forEach(function (k) { row[k] = keep[k]; });
+            dropLookupNames(row);
             clearTimeout(m.timer);
             state.meta[row.id] = null; delete state.meta[row.id];
             repaint(row);
@@ -1282,12 +1309,12 @@
         if (c.head) return false;
         if (c.tasks) return on("__tasks");
         if (c.extra) return on(c.extra);
-        return !!(c.f && (c.f.kind === "toss" ? on("__toss") : on(c.f.api)));
+        return !!(c.f && on(c.f.api));
     }
     async function autoRefresh() {
         if (state.refreshing) return;
         if (!$("view-detail").hidden) { await refreshDetail(); return; }
-        var listSeq0 = state.listSeq, mySeq = ++state.refreshSeq, toss0 = state.tossInList;
+        var listSeq0 = state.listSeq, mySeq = ++state.refreshSeq;
         state.refreshing = true;
         var got;
         try { got = await fetchRows(); }
@@ -1312,9 +1339,10 @@
             if (!o) { changes[nr.id] = { "*": true }; return; }
             var cs = {};
             CFG.fields.forEach(function (f) {
-                if (f.kind === "toss") { if (got.toss && toss0 && tossTextOf(o, true) !== tossTextOf(nr, true)) cs.__toss = true; return; }
                 if (!f.api || !exists(f.api)) return;
                 if (cmpValue(f, o) !== cmpValue(f, nr)) cs[f.api] = true;
+                // 参照は id が同じでも、両方で名前を読めていれば名前の変化も知らせる
+                else if (f.kind === "lookup" && got.names && lookupText(o, f.api) !== "—" && lookupText(o, f.api) !== lookupText(nr, f.api)) cs[f.api] = true;
             });
             [CFG.staffField, CFG.storeField].forEach(function (k) { if (norm(o[k]) !== norm(nr[k])) cs[k] = true; });
             if (got.tasks && state.taskSum) {
@@ -1332,7 +1360,7 @@
         got.rows.forEach(function (r) { ids[r.id] = true; });
         Object.keys(state.meta || {}).forEach(function (id) { if (!ids[id]) delete state.meta[id]; });
         state.rows = got.rows;
-        state.tossInList = got.toss;
+        state.namesInList = got.names;
         // タスクが一時的に読めなかったときは前回の値を保つ（列を「—」にしない。警告だけ出す）
         if (got.tasks || !taskCfg()) state.taskSum = got.tasks;
         var until = Date.now() + FLASH_MS, keepFl = {};
@@ -1385,7 +1413,6 @@
         }
         window.scrollTo(0, p.winY);
     }
-    function tossTextOf(row, inList) { var keep = state.tossInList; state.tossInList = inList; var t = tossText(row); state.tossInList = keep; return t; }
 
     // 1台の画面の自動の読み直し（入力が無いときだけ。値が変わった項目に数秒だけ色を付ける）
     async function refreshDetail() {
@@ -1406,15 +1433,13 @@
         // タスクも一緒に読み直す（足す・完了にする操作が始まっていれば、その後の読み直しに任せる）
         if (!cur.taskBusy) loadTasks(true);
         var changed = changedFields2(fresh, cur.base);
-        var oldLk = cur.base[CFG.deal.lookupField], newLk = fresh[CFG.deal.lookupField];
-        var keepToss = cur.toss, editorVal = $("editor-input").value;
-        var lkChanged = (oldLk && oldLk.id) !== (newLk && newLk.id);
+        // 参照は id が同じでも名前（商談名）が変わっていれば描き直す
+        var nameChanged = CFG.fields.some(function (f) { return f.kind === "lookup" && exists(f.api) && lookupText(cur.base, f.api) !== lookupText(fresh, f.api); });
+        var editorVal = $("editor-input").value;
         cur.base = fresh;
-        cur.toss = keepToss;
-        if (!changed.length && !lkChanged) { markRefreshed(); return; } // 変わっていなければ描き直さない（色も保つ）
+        if (!changed.length && !nameChanged) { markRefreshed(); return; } // 変わっていなければ描き直さない（色も保つ）
         renderDetail();
         $("editor-input").value = editorVal;
-        if ((oldLk && oldLk.id) !== (newLk && newLk.id)) loadToss(fresh);
         window.scrollTo(0, y);
         state.listStale = true;
         markRefreshed();
@@ -1458,9 +1483,8 @@
             return;
         }
         if (seq !== state.viewSeq) return; // 別の車両・一覧に移った
-        state.cur = { id: id, base: rec, toss: null, values: {}, seq: seq, tasks: null, tasksErr: "", taskSeq: 0, taskBusy: false, whoTouched: false };
+        state.cur = { id: id, base: rec, values: {}, seq: seq, tasks: null, tasksErr: "", taskSeq: 0, taskBusy: false, whoTouched: false };
         renderDetail();
-        loadToss(rec);
         initTaskForm();
         loadTasks(false);
     }
@@ -1649,55 +1673,45 @@
         else { state.listStale = true; setTaskMsg("warn", "完了にしました（" + name + "）。ただし、タスクの一覧を読み直せませんでした。"); }
     }
 
-    async function loadToss(rec) {
-        var cur = state.cur, d = CFG.deal, text;
-        var lk = rec[d.lookupField];
-        if (!lk || !lk.id) text = "（商談の紐づけなし）";
-        else {
-            try {
-                var deal = await getOne(d.module, lk.id);
-                if (normBool(deal[d.naField])) text = "対象外";
-                else if (dateOnly(deal[d.tossField])) text = fmtDate(deal[d.tossField]);
-                else text = "未";
-            } catch (e) { text = "（商談を読めませんでした）"; }
-        }
-        if (state.cur !== cur) return; // 別の車両に移った
-        cur.toss = text;
-        var el = $("toss-value");
-        if (el) el.textContent = text;
-    }
-
     function baseValue(f, rec) {
         if (f.kind === "bool") return normBool(rec[f.api]);
         if (f.kind === "date") return dateOnly(rec[f.api]);
+        // 参照は id で比べる（COQL は id だけ、getRecord は名前も返すので、名前では比べられない）
+        if (f.kind === "lookup") return lookupId(rec, f.api);
+        // 複数行の項目は改行を \n にそろえる（textarea の value は \r\n を \n にするので、開いただけで「変更あり」にしない）
+        if (f.multiline) return String(norm(rec[f.api])).replace(/\r\n?/g, "\n");
         return norm(rec[f.api]);
     }
 
     function renderDetail() {
         var cur = state.cur, rec = cur.base, p = progressOf(rec);
-        $("detail-title").textContent = (norm(rec[CFG.customerField]) || "（お客様名なし）") + "　" + norm(rec[CFG.vehicleField]);
+        $("detail-title").textContent = (norm(rec[CFG.customerField]) || "（顧客名なし）") + "　" + norm(rec[CFG.vehicleField]);
         $("detail-sub").textContent = "進み具合 " + p.n + "/" + p.m + (norm(rec[CFG.staffField]) ? "　担当 " + norm(rec[CFG.staffField]) : "");
         cur.values = {};
         var h = "";
         CFG.fields.forEach(function (f) {
-            if (f.kind !== "toss" && !exists(f.api)) return;
+            if (!exists(f.api)) return;
             h += "<div class='item item-" + f.kind + "' data-item='" + esc(f.api) + "'><label class='item-label' for='in-" + f.key + "'>" + esc(f.label) +
                 (f.note ? "<small>" + esc(f.note) + "</small>" : "") + "</label><div class='item-input'>";
-            if (f.kind === "display") {
+            if (f.kind === "lookup") {
+                var lt = lookupText(rec, f.api);
+                h += "<span class='ro'>" + esc(lt || "（紐づけなし）") + "</span>";
+            } else if (f.kind === "display") {
                 var dv = f.date ? fmtDate(rec[f.api]) : norm(rec[f.api]);
                 h += "<span class='ro'>" + esc(dv || "—") + "</span>";
             } else if (f.kind === "number") {
                 var nv = norm(rec[f.api]);
                 if (nv !== "" && !isNaN(Number(nv))) nv = String(Math.round(Number(nv)));
                 h += "<span class='ro'>" + esc(nv === "" ? "—" : nv) + "</span>";
-            } else if (f.kind === "toss") {
-                h += "<span class='ro' id='toss-value'>" + esc(cur.toss || "読み込んでいます…") + "</span>";
             } else {
                 var v = baseValue(f, rec);
                 cur.values[f.api] = v;
                 if (f.kind === "date") {
                     h += "<input type='date' id='in-" + f.key + "' data-api='" + esc(f.api) + "' value='" + esc(v) + "'>" +
                         "<button type='button' class='clear' data-clear='" + esc(f.api) + "' aria-label='消す'>消す</button>";
+                } else if (f.kind === "text" && f.multiline) {
+                    // 複数行の項目（textarea）は複数行の入力欄で、改行をそのまま保つ
+                    h += "<textarea id='in-" + f.key + "' data-api='" + esc(f.api) + "' maxlength='" + (f.maxLength || 2000) + "' rows='3'>\n" + esc(v) + "</textarea>"; // 先頭の \n は HTML が捨てる（値の先頭の改行を保つため）
                 } else if (f.kind === "text" && /[\r\n]/.test(v)) {
                     // 1行の入力欄は改行を落とすので、開いただけで「変更あり」になり、保存で改行が消える。
                     // 改行を含む値は表示だけにして送らない（直すのは CRM の画面で）
@@ -1861,9 +1875,7 @@
                 // （止まっていない自分の入力はそのまま保つ）
                 cur.conflicts = cur.conflicts || {};
                 clash.forEach(function (f) { cur.conflicts[f.api] = { crm: baseValue(f, fresh), mine: diff[f.api] }; });
-                var keepToss0 = cur.toss;
                 cur.base = fresh;
-                cur.toss = keepToss0;
                 Object.keys(cur.values).forEach(function (api) {
                     var nv = baseValue(fieldOf(api), fresh);
                     if (!Object.prototype.hasOwnProperty.call(diff, api)) setInputValue(api, nv);
@@ -1875,9 +1887,7 @@
             }
             if (changed.length) {
                 refreshed = inputLabels(changed);
-                var keepToss = cur.toss;
                 cur.base = fresh;
-                cur.toss = keepToss;
             }
             // 2. 変えた項目だけを送る
             data = { id: cur.id };
@@ -1920,7 +1930,6 @@
         cur.base = back;
         setBusy(false);
         renderDetail();
-        loadToss(back);
         var also = refreshed.length ? "<br>開いた後にほかで変わっていた項目（" + esc(refreshed.join("・")) + "）は、最新を表示しています。" : "";
         if (diffs.length) {
             setNotice("detail-notice", "warn", "保存しましたが、次の項目は入れた値と違う値になっています（CRM の自動処理で変わった可能性があります）: " + esc(diffs.join("・")) + also);
