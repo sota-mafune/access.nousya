@@ -56,9 +56,18 @@ var NOUSYA_CONFIG = {
     //   done : 「済」と数える値。空配列なら「何か入っていれば済」
     //   count : 進み具合に数えるか（一覧の分母）
     //   when : その列を数える条件（項目 -> 値の配列）。当たらなければ分母からも外す
+    //   required : 空にできない（空で確定すると止める）
+    //   gridWhen : 表の列に出す条件（allStaff = 担当を「すべて」にしているか管理者 / admin = 管理者）。無ければ常に出す
     fields: [
-        { key: "customer", label: "お客様名", api: "field3", kind: "display" },
-        { key: "vehicle", label: "車種", api: "Name", kind: "display" },
+        { key: "customer", label: "お客様名", api: "field3", kind: "text", maxLength: 255 },
+        // 車種は受注車両の名前（CRM で空にできない）
+        { key: "vehicle", label: "車種", api: "Name", kind: "text", maxLength: 120, required: true },
+        // 担当は「すべての担当」を出しているときと管理者だけ、店舗は管理者だけ表の列に出す（1台の画面には常に出す）
+        { key: "staff", label: "担当", api: "field4", kind: "text", maxLength: 255, gridWhen: "allStaff" },
+        { key: "store", label: "店舗", api: "field5", kind: "text", maxLength: 255, gridWhen: "admin" },
+        // 仕入No は重複不可（同じ値があると CRM が保存を断る）。JOCAR の取り込みはこの値で既存の車両を上書きする
+        { key: "stockNo", label: "仕入NO", api: "No", kind: "text", maxLength: 255 },
+        { key: "deliveryStage", label: "納車ステージ", api: "DeliveryStage", kind: "pick", options: ["登録書類待ち", "登録提出", "登録済み", "納車日確定待ち", "納車整備完了", "納車準備完了", "納車完了"] },
         { key: "category", label: "区分", api: "field50", kind: "display" },
         { key: "newCarOrder", label: "新車発注", api: "field31", kind: "date", count: true, done: [], when: { field50: ["新車"] } },
         { key: "contractDate", label: "成約日", api: "field32", kind: "display", date: true },

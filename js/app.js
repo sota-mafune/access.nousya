@@ -499,12 +499,10 @@
         var cols = [{ head: true, label: "進み具合" }];
         CFG.fields.forEach(function (f) {
             if (f.kind !== "toss" && !exists(f.api)) return;
+            // 担当（すべての担当を出しているときと管理者）・店舗（管理者）は条件つきで列に出す
+            if (f.gridWhen === "allStaff" && !(state.staff === "" || state.isAdmin)) return;
+            if (f.gridWhen === "admin" && !state.isAdmin) return;
             cols.push({ f: f, label: f.label });
-            // 車種の右に担当（すべての担当を出しているときと管理者）と店舗（管理者）
-            if (f.api === CFG.vehicleField) {
-                if (state.staff === "" || state.isAdmin) cols.push({ extra: CFG.staffField, label: "担当" });
-                if (state.isAdmin) cols.push({ extra: CFG.storeField, label: "店舗" });
-            }
         });
         return cols;
     }
@@ -557,6 +555,14 @@
             var td = cellEl(ri, ci);
             if (td) paintCell(td, row, c, m);
         });
+        schedulePlaceSticky();
+    }
+    // 固定列（お客様名・車種）は入力で幅が変わるので、描き直したら次の描画の前に位置を合わせ直す（何行描いても1回）
+    var stickyQueued = false;
+    function schedulePlaceSticky() {
+        if (stickyQueued) return;
+        stickyQueued = true;
+        requestAnimationFrame(function () { stickyQueued = false; placeSticky(); });
     }
 
     function paintCell(td, row, c, m) {
@@ -717,6 +723,7 @@
         td.textContent = "";
         td.classList.add("editing");
         td.appendChild(el);
+        schedulePlaceSticky();
         el.addEventListener("keydown", onEditorKey);
         el.addEventListener("blur", function () { if (state.editing && state.editing.el === el) finishEdit(true, true); });
         // 選んだ値はすぐ画面（進み具合・色）に出すが、送るのは編集を終えてから（行を抜けたとき・確定から3秒後）
@@ -740,7 +747,14 @@
                     commit = false;
                 }
             } else if (f.kind === "pick") v = ed.el.value;
-            else v = ed.el.value.trim();
+            else {
+                v = ed.el.value.trim();
+                if (f.required && v === "") {
+                    if (!blur) { ed.el.classList.add("bad"); setGridMessage(f.label + "は空にできません（Esc で取り消し）。"); return false; }
+                    setGridMessage(f.label + "は空にできないので、取り消しました。");
+                    commit = false;
+                }
+            }
         }
         state.editing = null;
         var td = cellEl(ed.r, ed.c);
@@ -1476,6 +1490,8 @@
         if (cur.conflicts && Object.keys(cur.conflicts).length) { showDetailConflicts(); return; }
         var diff = changedFields(), apis = Object.keys(diff);
         if (!apis.length) { updateDirty(); return; }
+        var empty = apis.map(fieldOf).filter(function (f) { return f.required && String(diff[f.api] == null ? "" : diff[f.api]).trim() === ""; });
+        if (empty.length) { setNotice("detail-notice", "warn", esc(empty[0].label) + "は空にできません。"); return; }
         var editor = "";
         if (editorReady()) {
             editor = String($("editor-input").value || "").trim();
