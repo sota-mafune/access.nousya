@@ -26,7 +26,8 @@
         staff: "",             // "" = すべて
         store: "",
         listStale: false,
-        listSeq: 0,            // 一覧の読み込みの連番（遅れて返った古い結果を捨てる）
+        listPos: null,         // 1台の画面を開く前の一覧の位置・選んでいるセル（戻ったときに戻す）
+        listSeq: 0,           // 一覧の読み込みの連番（遅れて返った古い結果を捨てる）
         viewSeq: 0,            // 1台の画面の読み込みの連番（同じ）
         listLoading: false,
         saving: false,
@@ -269,9 +270,10 @@
     async function loadList() {
         var seq = ++state.listSeq;
         state.viewSeq++;          // 開きかけの1台の結果は捨てる
-        // 表のスクロール位置を控える（読み直した後に同じ所を見せる）
-        var wrap0 = $("view-list").hidden ? null : $("grid-wrap");
-        var keepPos = wrap0 ? { left: wrap0.scrollLeft, top: wrap0.scrollTop, winY: window.scrollY } : null;
+        // 位置と選んでいるセルを控える（読み直した後に同じ所を見せる）。1台の画面から戻るときは、
+        // 「開く」の前に控えた位置を使う（ここでは一覧が隠れていて測れないため）
+        var keepPos = $("view-list").hidden ? state.listPos : captureListPos();
+        state.listPos = null;
         state.cur = null;
         state.listLoading = true;
         show("view-list");
@@ -304,11 +306,7 @@
         if (taskCfg() && !state.taskSum) warns.push("タスクを一覧では読めませんでした（「—」と表示）。1台の画面で確かめてください。");
         if (warns.length) setNotice("list-notice", "warn", warns.map(esc).join("<br>"));
         renderList();
-        if (keepPos && state.gridMode) {
-            var wrap1 = $("grid-wrap");
-            if (wrap1) { wrap1.scrollLeft = keepPos.left; wrap1.scrollTop = keepPos.top; }
-            window.scrollTo(0, keepPos.winY);
-        }
+        restoreListPos(keepPos);
     }
 
     // 一覧の行を読む（手動の読み直し・自動の読み直しで共通）
@@ -336,8 +334,9 @@
 
     // ---------------------------------------------------------------- タスク（CRM 標準の Tasks）
     // 受注車両にひも付いた未完了のタスクを COQL で読み、車ごとに件数といちばん近い期限にまとめる。
-    // 台数が少なければ What_Id in (50台ずつ) で（実測: in は 50 個まで）、多ければ受注車両ひも付きの未完了を
-    // まとめて読み、手元で今の一覧の車に絞る（回数を抑える）。どちらも 200 件ずつ読む
+    // 台数にかかわらず What_Id in (50台ずつ) で読む（実測: in は 50 個まで）。同時に読むのは数本まで（config の parallel、既定 3）。
+    // どれも 200 件ずつ。受注車両ひも付きの未完了をまとめて読む形は、ほかの車のタスクが多いと上限に当たって全車「—」に
+    // なるので採らない（v=20261120l で外した）
     function taskCfg() { return CFG.tasks || null; }
     function idOnly(v) { return String(v || "").replace(/[^0-9]/g, ""); }
     async function coqlPaged(base, cap) {
@@ -363,20 +362,32 @@
         if (!T) return null;
         var want = {}, ids = [];
         rows.forEach(function (r) { var i = idOnly(r.id); if (i && !want[i]) { want[i] = true; ids.push(i); } });
+        // 読んだ車は 0 件でも入れておく（後から一覧に増えた車は、読み直すまで「—」と出すため）
         var sum = {};
+        ids.forEach(function (i) { sum[i] = { n: 0, due: "" }; });
         if (!ids.length) return sum;
         var open = "Status != '" + T.doneStatus.replace(/'/g, "") + "'";
         var cols = "select id, What_Id, Due_Date from " + T.module + " where ";
-        var tasks = [];
         var inMax = T.inMax || 50;
-        if (ids.length <= inMax * (T.inChunksMax || 5)) {
-            for (var i = 0; i < ids.length; i += inMax) {
-                var part = ids.slice(i, i + inMax).map(function (x) { return "'" + x + "'"; }).join(", ");
-                tasks = tasks.concat(await coqlPaged(cols + "(What_Id in (" + part + ") and " + open + ") order by id asc", MAX_ROWS));
-            }
-        } else {
-            tasks = await coqlPaged(cols + "($se_module = '" + CFG.module + "' and " + open + ") order by id asc", MAX_ROWS);
+        var queries = [];
+        for (var i = 0; i < ids.length; i += inMax) {
+            var part = ids.slice(i, i + inMax).map(function (x) { return "'" + x + "'"; }).join(", ");
+            queries.push(cols + "(What_Id in (" + part + ") and " + open + ") order by id asc");
         }
+        // 同時に parallel 本まで。1本でも失敗したら残りは読まずに失敗にする（列は「—」か前回の値）
+        var results = new Array(queries.length), next = 0, failed = false;
+        async function worker() {
+            while (!failed && next < queries.length) {
+                var k = next++;
+                try { results[k] = await coqlPaged(queries[k], MAX_ROWS); }
+                catch (e) { failed = true; throw e; }
+            }
+        }
+        var workers = [];
+        for (var w = 0; w < Math.min(T.parallel || 3, queries.length); w++) workers.push(worker());
+        await Promise.all(workers);
+        var tasks = [];
+        results.forEach(function (r) { tasks = tasks.concat(r || []); });
         tasks.forEach(function (t) {
             var w = t.What_Id, wid = idOnly(w && typeof w === "object" ? w.id : w);
             if (!wid || !want[wid]) return;
@@ -393,10 +404,10 @@
         var mt = /^\s*担当\s*[:：]\s*(.*)$/.exec(first);
         return mt ? mt[1].trim() : "";
     }
-    // 表・カードに出す「N 件／期限」。読めなければ「—」、0 件は空
+    // 表・カードに出す「N 件／期限」。読めなければ「—」（読んでいない車も）、0 件は空
     function taskSumOf(id) {
         if (!state.taskSum) return null;
-        return state.taskSum[idOnly(id)] || { n: 0, due: "" };
+        return state.taskSum[idOnly(id)] || null;
     }
     function taskSumText(id) {
         var s = taskSumOf(id);
@@ -1313,11 +1324,7 @@
             if (Object.keys(cs).length) changes[nr.id] = cs;
         });
         // 位置を控える
-        var wrap = $("grid-wrap"), sl = wrap ? wrap.scrollLeft : 0, st = wrap ? wrap.scrollTop : 0;
-        var hadFocus = wrap && document.activeElement === wrap;
-        var activeId = null, activeC = null;
-        if (state.gridMode && state.active && state.gridView[state.active.r]) { activeId = state.gridView[state.active.r].id; activeC = state.active.c; }
-        var winY = window.scrollY;
+        var pos = captureListPos();
         // 差し替える（行ごとの状態 meta は id で引くので保つ。無くなった行のものは消す）
         var seq = ++state.listSeq;
         got.rows.forEach(function (r) { r.__gen = seq; });
@@ -1326,7 +1333,8 @@
         Object.keys(state.meta || {}).forEach(function (id) { if (!ids[id]) delete state.meta[id]; });
         state.rows = got.rows;
         state.tossInList = got.toss;
-        state.taskSum = got.tasks;
+        // タスクが一時的に読めなかったときは前回の値を保つ（列を「—」にしない。警告だけ出す）
+        if (got.tasks || !taskCfg()) state.taskSum = got.tasks;
         var until = Date.now() + FLASH_MS, keepFl = {};
         Object.keys(state.flashChanged || {}).forEach(function (id) {
             if (!ids[id]) return;
@@ -1340,21 +1348,13 @@
         });
         state.flashChanged = keepFl;
         markRefreshed();
-        if (taskCfg() && !got.tasks) { state.refreshSkip = "タスクを読めませんでした。列は「—」"; showRefreshInfo(); }
+        if (taskCfg() && !got.tasks) {
+            state.refreshSkip = state.taskSum ? "タスクを読み直せませんでした。タスクの列は前回の値" : "タスクを読めませんでした。列は「—」";
+            showRefreshInfo();
+        }
         fillSelectors();
         renderList();
-        // 位置を戻す
-        if (state.gridMode) {
-            wrap = $("grid-wrap");
-            if (wrap) { wrap.scrollLeft = sl; wrap.scrollTop = st; }
-            if (activeId !== null) {
-                var ri = -1;
-                state.gridView.forEach(function (r, i) { if (String(r.id) === String(activeId)) ri = i; });
-                if (ri !== -1) setActive(ri, Math.min(activeC, state.gridCols.length - 1), true);
-            }
-            if (hadFocus && wrap) wrap.focus({ preventScroll: true });
-        }
-        window.scrollTo(0, winY);
+        restoreListPos(pos);
         if (Object.keys(changes).length) {
             clearTimeout(state.flashTimer);
             state.flashTimer = setTimeout(function () {
@@ -1362,6 +1362,28 @@
                 document.querySelectorAll(".car-changed").forEach(function (el) { el.classList.remove("car-changed"); });
             }, FLASH_MS + 50);
         }
+    }
+    // 一覧（表・カード）の見えている位置と選んでいるセルを控える／戻す（自動の読み直し・1台の画面から戻ったとき）
+    function captureListPos() {
+        var wrap = $("grid-wrap");
+        var p = { left: wrap ? wrap.scrollLeft : 0, top: wrap ? wrap.scrollTop : 0, winY: window.scrollY,
+            hadFocus: !!wrap && document.activeElement === wrap, activeId: null, activeC: null };
+        if (state.gridMode && state.active && state.gridView[state.active.r]) { p.activeId = state.gridView[state.active.r].id; p.activeC = state.active.c; }
+        return p;
+    }
+    function restoreListPos(p) {
+        if (!p) return;
+        if (state.gridMode) {
+            var wrap = $("grid-wrap");
+            if (wrap) { wrap.scrollLeft = p.left; wrap.scrollTop = p.top; }
+            if (p.activeId !== null) {
+                var ri = -1;
+                state.gridView.forEach(function (r, i) { if (String(r.id) === String(p.activeId)) ri = i; });
+                if (ri !== -1) setActive(ri, Math.min(p.activeC, state.gridCols.length - 1), true);
+            }
+            if (p.hadFocus && wrap) wrap.focus({ preventScroll: true });
+        }
+        window.scrollTo(0, p.winY);
     }
     function tossTextOf(row, inList) { var keep = state.tossInList; state.tossInList = inList; var t = tossText(row); state.tossInList = keep; return t; }
 
@@ -1415,6 +1437,8 @@
 
     async function openCar(id) {
         var seq = ++state.viewSeq;
+        // 一覧から開くときは、一覧の位置と選んでいるセルを控える（「← 一覧」で戻す。1台の画面での開き直しでは控え直さない）
+        if (!$("view-list").hidden) state.listPos = captureListPos();
         // 一覧の読み込みの途中なら、その結果は捨てる（遅れて返って画面が一覧に戻らないように）。戻ったときに読み直す
         if (state.listLoading) { state.listSeq++; state.listLoading = false; state.listStale = true; }
         state.cur = null;
@@ -1470,9 +1494,14 @@
     function setTaskBusy(on) {
         var cur = state.cur;
         if (cur) cur.taskBusy = on;
-        $("tasks").classList.toggle("busy", on);
-        $("tasks").querySelectorAll("input, button").forEach(function (el) { el.disabled = on; });
-        $("back-btn").disabled = on || state.saving;
+        syncTaskControls();
+    }
+    // タスクの欄と「← 一覧」は、タスクを送っている間も車を保存している間（state.saving）も止める
+    function syncTaskControls() {
+        var off = !!(state.cur && state.cur.taskBusy) || state.saving;
+        $("tasks").classList.toggle("busy", off);
+        $("tasks").querySelectorAll("input, button").forEach(function (el) { el.disabled = off; });
+        $("back-btn").disabled = off;
     }
     function isDoneTask(t) { return norm(t.Status) === taskCfg().doneStatus; }
     function updateTaskSum(id, list) {
@@ -1562,7 +1591,7 @@
     }
     async function addTask() {
         var cur = state.cur, T = taskCfg();
-        if (!cur || !T || cur.taskBusy) return;
+        if (!cur || !T || cur.taskBusy || state.saving) return;   // 車の保存中は足さない
         var subj = String($("task-subject").value || "").trim();
         if (!subj) { setTaskMsg("warn", "件名を入れてください。"); $("task-subject").focus(); return; }
         var due = String($("task-due").value || "").trim();
@@ -1578,24 +1607,24 @@
             var r0 = res && res.data && res.data[0];
             if (!r0 || String(r0.code || "").toUpperCase() !== "SUCCESS") throw (r0 || res || "応答がありませんでした");
         } catch (e) {
-            if (state.cur !== cur) return;
+            if (state.cur !== cur) { state.listStale = true; return; }   // 入ったかもしれない。一覧の件数は次に戻ったとき読み直す
             setTaskBusy(false);
             setTaskMsg("error", "タスクを足せませんでした（" + esc(errText(e)) + "）。入れた内容は残っています。もう一度押してください。");
             return;
         }
-        // ここから先は CRM に入った後
-        if (state.cur !== cur) return;
+        // ここから先は CRM に入った後。別の画面に移っていたら、一覧の件数が古いので読み直しの印を付ける
+        if (state.cur !== cur) { state.listStale = true; return; }
         $("task-subject").value = "";
         $("task-due").value = "";
         var ok = await loadTasks(true);
-        if (state.cur !== cur) return;
+        if (state.cur !== cur) { state.listStale = true; return; }
         setTaskBusy(false);
         if (ok) setTaskMsg("ok", "タスクを足しました（" + esc(subj) + "）。");
         else { state.listStale = true; setTaskMsg("warn", "タスクを足しました（" + esc(subj) + "）。ただし、タスクの一覧を読み直せませんでした。"); }
     }
     async function completeTask(taskId) {
         var cur = state.cur, T = taskCfg();
-        if (!cur || !T || cur.taskBusy) return;
+        if (!cur || !T || cur.taskBusy || state.saving) return;   // 車の保存中は完了にしない
         var t = null;
         (cur.tasks || []).forEach(function (x) { if (String(x.id) === String(taskId)) t = x; });
         if (!t) return;
@@ -1606,14 +1635,14 @@
             var r0 = res && res.data && res.data[0];
             if (!r0 || String(r0.code || "").toUpperCase() !== "SUCCESS") throw (r0 || res || "応答がありませんでした");
         } catch (e) {
-            if (state.cur !== cur) return;
+            if (state.cur !== cur) { state.listStale = true; return; }
             setTaskBusy(false);
             setTaskMsg("error", "完了にできませんでした（" + esc(errText(e)) + "）。もう一度押してください。");
             return;
         }
-        if (state.cur !== cur) return;
+        if (state.cur !== cur) { state.listStale = true; return; }
         var ok = await loadTasks(true);
-        if (state.cur !== cur) return;
+        if (state.cur !== cur) { state.listStale = true; return; }
         setTaskBusy(false);
         var name = esc(norm(t.Subject) || "件名なし");
         if (ok) setTaskMsg("ok", "完了にしました（" + name + "）。");
@@ -1912,7 +1941,7 @@
         // inert が効かないブラウザ向けに、入力欄とボタンも止める
         items.querySelectorAll("input, select, button").forEach(function (el) { el.disabled = on; });
         $("editor-input").disabled = on;
-        $("back-btn").disabled = on || !!(state.cur && state.cur.taskBusy);
+        syncTaskControls();   // タスクの欄と「← 一覧」も止める
         var btn = $("save-btn");
         if (on) { btn.disabled = true; btn.textContent = "保存しています…"; }
         else updateDirty();
@@ -1934,7 +1963,13 @@
         state.cur = null;
         $("tasks").hidden = true;
         state.viewSeq++;
-        if (state.listStale) loadList(); else { show("view-list"); renderList(); }
+        // 「開く」の前の位置・選んでいたセルに戻す（読み直すときは loadList が控えを使う）
+        if (state.listStale) { loadList(); return; }
+        var pos = state.listPos;
+        state.listPos = null;
+        show("view-list");
+        renderList();
+        restoreListPos(pos);
     }
 
     // ---------------------------------------------------------------- 画面の操作
@@ -2027,8 +2062,10 @@
         $("items").addEventListener("change", updateDirty);
         $("detail-notice").addEventListener("click", function (ev) {
             var id = ev.target && ev.target.id;
-            if (id === "reload-btn" && state.cur && !state.saving) openCar(state.cur.id);
-            else if (id === "leave-yes") leaveToList();
+            // タスクを送っている間・車を保存している間は、開き直し・戻るをしない（送り終えてから）
+            var busy = state.saving || !!(state.cur && state.cur.taskBusy);
+            if (id === "reload-btn" && state.cur && !busy) openCar(state.cur.id);
+            else if (id === "leave-yes") { if (!busy) leaveToList(); }
             else if (ev.target && ev.target.classList && ev.target.classList.contains("rs-d")) resolveDetail(ev.target.getAttribute("data-api"), ev.target.getAttribute("data-rs"));
             else if (id === "leave-no") showDetailConflicts(); // 選び直しの途中なら選択を出し直す（無ければ消える）
         });
