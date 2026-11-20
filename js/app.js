@@ -268,6 +268,9 @@
     async function loadList() {
         var seq = ++state.listSeq;
         state.viewSeq++;          // 開きかけの1台の結果は捨てる
+        // 表のスクロール位置を控える（読み直した後に同じ所を見せる）
+        var wrap0 = $("view-list").hidden ? null : $("grid-wrap");
+        var keepPos = wrap0 ? { left: wrap0.scrollLeft, top: wrap0.scrollTop, winY: window.scrollY } : null;
         state.cur = null;
         state.listLoading = true;
         show("view-list");
@@ -296,6 +299,11 @@
         fillSelectors();
         if (!state.tossInList) setNotice("list-notice", "warn", "保険トス（商談）を一覧では読めませんでした。1台の画面では表示します。");
         renderList();
+        if (keepPos && state.gridMode) {
+            var wrap1 = $("grid-wrap");
+            if (wrap1) { wrap1.scrollLeft = keepPos.left; wrap1.scrollTop = keepPos.top; }
+            window.scrollTo(0, keepPos.winY);
+        }
     }
 
     // 一覧の行を読む（手動の読み直し・自動の読み直しで共通）
@@ -849,7 +857,7 @@
     function repaint(row) {
         if (!state.gridMode || !rowAlive(row)) return;
         var ri = state.gridView.indexOf(row);
-        if (ri !== -1) updateRow(ri);
+        if (ri !== -1) { updateRow(ri); placeSticky(); }   // 選び直しで行頭の列が広がる・戻ると、右の固定列の位置もずらす
         updateGridStatus();
     }
     function setRowError(row, m, status, msg, needReload) {
