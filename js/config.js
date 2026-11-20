@@ -67,7 +67,8 @@ var NOUSYA_CONFIG = {
         { key: "store", label: "店舗", api: "field5", kind: "text", maxLength: 255, gridWhen: "admin" },
         // 仕入No は表示だけ（11/20 決定）。商談・付帯品との紐づけと JOCAR の取り込みがこの値で照合するので、手で変えると紐づけがずれる
         { key: "stockNo", label: "仕入NO", api: "No", kind: "display" },
-        { key: "deliveryStage", label: "納車ステージ", api: "DeliveryStage", kind: "pick", options: ["登録書類待ち", "登録提出", "登録済み", "納車日確定待ち", "納車整備完了", "納車準備完了", "納車完了"] },
+        // 納車ステージは表示だけ（11/20 決定）。CRM の関数 nousya_stage_auto が書類回収日・登録課・納車日・整備指示書・入金確認・立替依頼から決める
+        { key: "deliveryStage", label: "納車ステージ", api: "DeliveryStage", kind: "display" },
         { key: "category", label: "区分", api: "field50", kind: "display" },
         { key: "newCarOrder", label: "新車発注", api: "field31", kind: "date", count: true, done: [], when: { field50: ["新車"] } },
         { key: "contractDate", label: "成約日", api: "field32", kind: "display", date: true },
@@ -78,10 +79,12 @@ var NOUSYA_CONFIG = {
         { key: "insuranceToss", label: "保険トス", api: "", kind: "toss" },
         { key: "insuranceJoin", label: "保険加入", api: "field58", kind: "pick", options: ["既契約車両入替", "〇", "×"], count: true, done: [] },
         { key: "payment", label: "入金確認", api: "field44", kind: "pick", options: ["未入金", "全額済", "半金済", "頭金入金済 立替未", "ローン立替未", "ローン立替済"], count: true, done: ["全額済", "ローン立替済"] },
-        { key: "registration", label: "登録課", api: "field45", kind: "text", maxLength: 255 },
+        // 登録課・整備指示書は CRM では文字の項目だが、納車ステージの判定に使うので決まった言葉から選ばせる（11/20 決定）。
+        // 今の自由記述の値は選択肢の後ろに出して消さない
+        { key: "registration", label: "登録課", api: "field45", kind: "pick", options: ["書類提出済", "登録済"] },
         { key: "partsRequest", label: "部品依頼", api: "field39", kind: "pick", options: ["実施済", "未実施"], count: true, done: ["実施済"] },
         { key: "advanceRequest", label: "立替依頼", api: "field29", kind: "pick", options: ["済", "未", "不要"], count: true, done: ["済", "不要"] },
-        { key: "maintenance", label: "整備指示書", api: "field35", kind: "text", maxLength: 255 },
+        { key: "maintenance", label: "整備指示書", api: "field35", kind: "pick", options: ["指示済", "整備完了"] },
         { key: "inspectionCert", label: "車検証送信", api: "field42", kind: "pick", options: ["要", "不要"], count: true, done: ["不要"] },
         { key: "daysContractToDelivery", label: "成約→納車日数", api: "field60", kind: "number" },
         { key: "daysToDelivery", label: "納車予定まで残り日数", api: "field59", kind: "number" },
