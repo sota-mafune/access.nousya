@@ -996,7 +996,33 @@
         apis.forEach(function (a) { m.flash[a] = true; });
         repaint(row);
         setTimeout(function () { apis.forEach(function (a) { delete m.flash[a]; }); if (m.status === "saved") m.status = ""; repaint(row); }, 1500);
+        followUpDisplay(row);
         if (m.again || Object.keys(m.edits).length) requestSave(row, m.again ? 0 : AUTOSAVE_MS);
+    }
+
+    // 保存の後に CRM のワークフローが書く「表示だけ」の項目（納車ステージ・日数の数式など）は、
+    // 保存直後の読み戻しに間に合わないことがある（sandbox で実測: 読み戻しの後に納車ステージが変わった）。
+    // 少し待ってからその行を読み直し、表示だけの項目が変わっていれば出す（入力する項目には触らない）
+    var FOLLOW_MS = 6000;
+    function followUpDisplay(row) {
+        var gen = row.__gen;
+        setTimeout(async function () {
+            if (row.__gen !== gen || !rowAlive(row)) return;
+            var fresh;
+            try { fresh = await getOne(CFG.module, row.id); } catch (e) { return; }
+            if (!fresh || row.__gen !== gen || !rowAlive(row)) return;
+            var until = Date.now() + FLASH_MS, changed = [];
+            CFG.fields.forEach(function (f) {
+                if (!f.api || (f.kind !== "display" && f.kind !== "number") || !exists(f.api)) return;
+                if (norm(row[f.api]) !== norm(fresh[f.api])) { row[f.api] = fresh[f.api]; changed.push(f.api); }
+            });
+            if (!changed.length) return;
+            state.flashChanged = state.flashChanged || {};
+            var fl = state.flashChanged[row.id] = state.flashChanged[row.id] || {};
+            changed.forEach(function (a) { fl[a] = until; });
+            repaint(row);
+            setTimeout(function () { if (rowAlive(row)) repaint(row); }, FLASH_MS + 50);
+        }, FOLLOW_MS);
     }
 
     async function reloadRow(id) {
